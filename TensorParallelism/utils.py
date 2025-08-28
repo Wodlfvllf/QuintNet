@@ -3,13 +3,67 @@ import torch.nn as nn
 import torch.distributed as dist
 from .processgroup import ProcessGroupManager
 
-def all_gather_cat_lastdim(local_tensor: torch.Tensor, group):
-    """All-gather local shard across `group` and concat on last dim."""
-    world_size = dist.get_world_size(group=group)
-    # Preallocate buffers on the same device and with the same shape as local shard
-    gather_list = [torch.empty_like(local_tensor) for _ in range(world_size)]
-    dist.all_gather(gather_list, local_tensor, group=group)
-    return torch.cat(gather_list, dim=-1)  # concat feature shards
+class All_Gather(torch.autograd.Function):
+    """
+    Forward: each rank has local x of shape [..., local_dim]
+             returns concatenated tensor of shape [..., local_dim * world_size]
+    Backward: takes grad_output of shape [..., local_dim * world_size]
+              returns the local slice (reduced/scattered) corresponding to this rank.
+    """
+
+    @staticmethod
+    def forward(ctx, x, group):
+        # x: tensor local to this rank
+        # group: process group (non-tensor) -> save on ctx as attribute
+
+        # store group (non-tensor) directly on ctx
+        ctx.tp_group = group
+
+        # save input tensor for backward if you will need it (optional)
+        # save_for_backward must get tensors only
+        ctx.save_for_backward(x)
+
+        # Ensure device/contiguous safety
+        out = x.contiguous()
+
+        # prepare gather list (each entry same shape as out)
+        world_size = dist.get_world_size(group=group)
+        gather_list = [torch.empty_like(out) for _ in range(world_size)]
+
+        # all_gather: after this, gather_list[i] contains x from rank i
+        dist.all_gather(gather_list, out, group=group)
+
+        # concat along feature dim (last dimension)
+        concat_output = torch.cat(gather_list, dim=-1).contiguous()
+
+        return concat_output
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        # grad_output: gradient w.r.t concat_output, shape [..., total_dim]
+        # We need to produce gradient for x only (first forward arg). Forward had (x, group)
+        x_saved, = ctx.saved_tensors
+        tp_group = ctx.tp_group
+
+        # get sizes from grad_output and group
+        world_size = dist.get_world_size(group=tp_group)
+        rank = dist.get_rank(group=tp_group)
+
+        # # fast path: if each rank already has full grad_output, slice locally
+        # # This avoids extra communication (recommended when possible)
+        # # Use torch.chunk to handle dimension splitting (works with remainder if handled)
+        # grads = torch.chunk(grad_output, world_size, dim=-1)
+        # grad_local = grads[rank].contiguous()
+
+        # Alternative: use reduce_scatter if grad_output might not be full on each rank
+        # Uncomment below to use reduce_scatter instead of pure slicing:
+        grad_list = list(grads)
+        grad_local = torch.empty_like(grad_list[0])
+        dist.reduce_scatter(grad_local, grad_list, group=tp_group, op=dist.ReduceOp.SUM)
+
+        # backward must return gradient for each forward input:
+        # forward inputs were (x, group) -> must return (grad_x, None)
+        return grad_local, None
 
 
 class ColumnParallelLinear(nn.Module):
@@ -38,20 +92,6 @@ class ColumnParallelLinear(nn.Module):
         self.proj.weight.requires_grad_(True)
         if self.proj.bias is not None:
             self.proj.bias.requires_grad_(True)
-        
-        # Register backward hook for gradient synchronization
-        if self.sync_gradients:
-            self.proj.register_full_backward_hook(self._backward_hook)
-
-    def _backward_hook(self, module, grad_input, grad_output):
-        """Synchronize gradients across TP group since all ranks see same data"""
-        if module.weight.grad is not None:
-            dist.all_reduce(module.weight.grad, op=dist.ReduceOp.SUM, group=self.tp_group)
-            module.weight.grad.div_(dist.get_world_size(self.tp_group))
-        
-        if module.bias is not None and module.bias.grad is not None:
-            dist.all_reduce(module.bias.grad, op=dist.ReduceOp.SUM, group=self.tp_group)
-            module.bias.grad.div_(dist.get_world_size(self.tp_group))
 
     def forward(self, x):
         if x.device != self.device:
@@ -59,9 +99,9 @@ class ColumnParallelLinear(nn.Module):
 
         local_out = self.proj(x)            # (B, out_features_per_rank)
         if self.gather_output:
-            return all_gather_cat_lastdim(local_out, self.tp_group)  # (B, total_out_features)
+            return All_Gather.apply(local_out, self.tp_group)  # (B, total_out_features)
         else:
-            return local_out  # Useful if next layer is row-parallel
+            return local_out
 
 
 def apply_tensor_parallel(model: nn.Module, tp_size: int, gather_output=True, sync_gradients=True):
