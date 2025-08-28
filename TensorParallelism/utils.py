@@ -116,8 +116,6 @@ class ColumnParallelLinear(nn.Module):
             # Useful if next layer expects local shard only
             return local_out
 
-
-
 def apply_tensor_parallel(model: nn.Module, tp_size: int, gather_output=True, sync_gradients=True):
     """
     Replace every nn.Linear with a ColumnParallelLinear that holds its out_feature shard.
@@ -172,7 +170,7 @@ def apply_tensor_parallel(model: nn.Module, tp_size: int, gather_output=True, sy
 
                 # Swap in-place
                 setattr(module, name, shard)
-                print(f"Replaced {current_path}: {in_f} -> {out_f} (rank {tp_rank} gets cols {start}:{end})")
+                # print(f"Replaced {current_path}: {in_f} -> {out_f} (rank {tp_rank} gets cols {start}:{end})")
 
             else:
                 replace_linear(child, current_path)
