@@ -5,103 +5,117 @@ from .processgroup import ProcessGroupManager
 
 class All_Gather(torch.autograd.Function):
     """
-    Forward: each rank has local x of shape [..., local_dim]
-             returns concatenated tensor of shape [..., local_dim * world_size]
-    Backward: takes grad_output of shape [..., local_dim * world_size]
-              returns the local slice (reduced/scattered) corresponding to this rank.
+    Forward:
+      - local x: shape [..., local_dim]
+      - returns concatenated tensor [..., local_dim * world_size]
+
+    Backward (mode='slice'): each rank slices grad_output to its local chunk (no comm).
+    Backward (mode='reduce_scatter'): uses reduce_scatter across ranks. Use only if
+      you know grad_output is not replicated on all ranks (or you want comm-based behavior).
     """
 
     @staticmethod
-    def forward(ctx, x, group):
-        # x: tensor local to this rank
-        # group: process group (non-tensor) -> save on ctx as attribute
-
-        # store group (non-tensor) directly on ctx
+    def forward(ctx, x, group, mode="slice"):
+        # Save the group (non-tensor) and mode on ctx for backward.
         ctx.tp_group = group
+        ctx.mode = mode
 
-        # save input tensor for backward if you will need it (optional)
-        # save_for_backward must get tensors only
+        # Save any tensor you need for backward (optional here)
         ctx.save_for_backward(x)
 
-        # Ensure device/contiguous safety
+        # ensure contiguous and device-correct
         out = x.contiguous()
 
-        # prepare gather list (each entry same shape as out)
         world_size = dist.get_world_size(group=group)
         gather_list = [torch.empty_like(out) for _ in range(world_size)]
 
-        # all_gather: after this, gather_list[i] contains x from rank i
+        # all_gather: collect local tensors from all ranks
         dist.all_gather(gather_list, out, group=group)
 
-        # concat along feature dim (last dimension)
         concat_output = torch.cat(gather_list, dim=-1).contiguous()
-
         return concat_output
 
     @staticmethod
     def backward(ctx, grad_output):
-        # grad_output: gradient w.r.t concat_output, shape [..., total_dim]
-        # We need to produce gradient for x only (first forward arg). Forward had (x, group)
-        x_saved, = ctx.saved_tensors
+        # grad_output: [..., total_dim]
         tp_group = ctx.tp_group
+        mode = ctx.mode
 
-        # get sizes from grad_output and group
         world_size = dist.get_world_size(group=tp_group)
         rank = dist.get_rank(group=tp_group)
 
-        # # fast path: if each rank already has full grad_output, slice locally
-        # # This avoids extra communication (recommended when possible)
-        # # Use torch.chunk to handle dimension splitting (works with remainder if handled)
-        # grads = torch.chunk(grad_output, world_size, dim=-1)
-        # grad_local = grads[rank].contiguous()
+        # ----- Mode 1: slice (recommended when each rank has full grad_output) -----
+        if mode == "slice":
+            # split into world_size chunks and return this rank's chunk
+            grads = torch.chunk(grad_output, world_size, dim=-1)
+            grad_local = grads[rank].contiguous()
+            return grad_local, None, None  # gradient for (x, group, mode)
 
-        # Alternative: use reduce_scatter if grad_output might not be full on each rank
-        # Uncomment below to use reduce_scatter instead of pure slicing:
-        grad_list = list(grads)
-        grad_local = torch.empty_like(grad_list[0])
-        dist.reduce_scatter(grad_local, grad_list, group=tp_group, op=dist.ReduceOp.SUM)
+        # ----- Mode 2: reduce_scatter (use carefully) -----
+        # This is for advanced patterns where full grad_output is not replicated on every rank
+        elif mode == "reduce_scatter":
+            # prepare list of chunks (local) for reduce_scatter
+            grads = list(torch.chunk(grad_output, world_size, dim=-1))
+            # allocate output chunk
+            out_chunk = torch.empty_like(grads[0])
+            # reduce_scatter will reduce (op=SUM) elementwise across ranks and scatter outputs
+            dist.reduce_scatter(out_chunk, grads, group=tp_group, op=dist.ReduceOp.SUM)
+            # Note: if every rank had identical grads, this out_chunk will be sum(grads_i across ranks)
+            # i.e., multiplied by world_size. Handle scaling outside if necessary.
+            return out_chunk, None, None
 
-        # backward must return gradient for each forward input:
-        # forward inputs were (x, group) -> must return (grad_x, None)
-        return grad_local, None
+        else:
+            raise RuntimeError(f"Unknown All_Gather backward mode: {mode}")
 
-
+# ColumnParallelLinear using All_Gather.apply
 class ColumnParallelLinear(nn.Module):
     """
-    Holds a column shard of an nn.Linear (split along out_features).
-    Returns either the local shard or the concatenated full output depending on `gather_output`.
+    Holds a column shard of nn.Linear (split across out_features).
+    If gather_output=True, returns the concatenated full output (each rank holds full).
+    If gather_output=False, returns local output (for following row-parallel layers).
     """
+
     def __init__(self, local_device, tp_group, in_features, out_features_per_rank,
-                 weight_slice, bias_slice, gather_output=True, sync_gradients=True):
+                 weight_slice, bias_slice=None, gather_output=True, sync_gradients=True,
+                 gather_mode="slice"):
         super().__init__()
         self.device = local_device
         self.tp_group = tp_group
         self.gather_output = gather_output
-        self.sync_gradients = sync_gradients  # New parameter
+        self.sync_gradients = sync_gradients
+        self.gather_mode = gather_mode  # "slice" or "reduce_scatter"
 
+        # Create a local linear with out_features_per_rank
         self.proj = nn.Linear(in_features, out_features_per_rank, bias=(bias_slice is not None),
                               device=self.device)
 
-        # Copy weights and ensure requires_grad=True
+        # Copy weights and bias into the parameter (no-grad)
         with torch.no_grad():
             self.proj.weight.copy_(weight_slice.to(self.device))
             if bias_slice is not None:
                 self.proj.bias.copy_(bias_slice.to(self.device))
-        
-        # CRITICAL: Ensure gradients are enabled
+
+        # Ensure gradients are tracked
         self.proj.weight.requires_grad_(True)
         if self.proj.bias is not None:
             self.proj.bias.requires_grad_(True)
 
+        # Prefer autograd function for comms (no hook), so we do not register backward hooks here.
+
     def forward(self, x):
+        # Ensure input on proper device
         if x.device != self.device:
             x = x.to(self.device, non_blocking=True)
 
-        local_out = self.proj(x)            # (B, out_features_per_rank)
+        local_out = self.proj(x)  # shape (B, out_features_per_rank)
+
         if self.gather_output:
-            return All_Gather.apply(local_out, self.tp_group)  # (B, total_out_features)
+            # IMPORTANT: use .apply to create autograd node
+            return All_Gather.apply(local_out, self.tp_group, self.gather_mode)
         else:
+            # Useful if next layer expects local shard only
             return local_out
+
 
 
 def apply_tensor_parallel(model: nn.Module, tp_size: int, gather_output=True, sync_gradients=True):
