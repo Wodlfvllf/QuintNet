@@ -264,9 +264,16 @@ class RowParallelLinear(nn.Module):
     def forward(self, x):
         if x.device != self.device:
             x = x.to(self.device, non_blocking=True)
-
         rank = dist.get_rank(self.tp_group)
-        inp = x[:, :, rank * self.in_features_per_rank : (rank + 1) * self.in_features_per_rank]
+        if x.dim() == 3:
+            # (batch, seq, hidden_dim)
+            inp = x[:, :, rank * self.in_features_per_rank : (rank + 1) * self.in_features_per_rank]
+        elif x.dim() == 2:
+            # (batch, hidden_dim) → add fake seq_len=1
+            inp = x[:, rank * self.in_features_per_rank : (rank + 1) * self.in_features_per_rank]
+        else:
+            raise ValueError(f"Unexpected input shape: {x.shape}")
+
 
         local_out = self.proj(inp)
         
