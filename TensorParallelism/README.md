@@ -83,7 +83,8 @@ PY
 
 ## 🏁 Running training (single-node / multi-GPU with `torchrun`)
 
-Your repository contains training scripts at:
+Mnist_Digit_Classification repository contains training scripts at:
+**Training repo (GitHub):** https://github.com/Wodlfvllf/Mnist-Digit-Classification
 
 * `Mnist_Digit_Classification/TP_training.py` (tensor-parallel training entry)
 * `Mnist_Digit_Classification/train.py` (single-node or module-run compatible)
