@@ -1,8 +1,16 @@
-import torch
-import torch.nn as nn
+"""
+Process group management for tensor parallelism.
+
+This module provides utilities for managing distributed process groups
+and organizing ranks into tensor parallel groups.
+"""
+
 import torch.distributed as dist
 
+
 class ProcessGroupManager:
+    """Manages process groups for tensor parallelism"""
+    
     def __init__(self, tp_size):
         self.world_size = dist.get_world_size()
         self.rank = dist.get_rank()
@@ -16,10 +24,13 @@ class ProcessGroupManager:
         self.tp_group = dist.new_group(ranks=ranks)
 
     def get_group(self):
+        """Get the tensor parallel process group"""
         return self.tp_group
 
     def get_tp_rank(self):
+        """Get rank within the tensor parallel group"""
         return dist.get_rank(self.tp_group)
 
     def get_tp_world_size(self):
+        """Get world size of the tensor parallel group"""
         return dist.get_world_size(self.tp_group)
