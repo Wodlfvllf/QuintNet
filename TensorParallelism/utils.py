@@ -205,7 +205,28 @@ def apply_tensor_parallel(model: nn.Module, tp_size: int, gather_output=True, sy
     
     return model
 
-
+class ReduceScatter(torch.autograd.Function):
+    """Reduce-scatter operation for more efficient gradient communication"""
+    @staticmethod
+    def forward(ctx, x, group):
+        ctx.tp_group = group
+        world_size = dist.get_world_size(group)
+        
+        # Split input into chunks
+        input_list = list(torch.chunk(x, world_size, dim=-1))
+        output = torch.empty_like(input_list[0])
+        
+        # Reduce-scatter
+        dist.reduce_scatter(output, input_list, group=group, op=dist.ReduceOp.SUM)
+        return output
+    
+    @staticmethod 
+    def backward(ctx, grad_output):
+        # All-gather gradients
+        world_size = dist.get_world_size(ctx.tp_group)
+        gather_list = [torch.empty_like(grad_output) for _ in range(world_size)]
+        dist.all_gather(gather_list, grad_output, group=ctx.tp_group)
+        return torch.cat(gather_list, dim=-1), None
 
 class All_Reduce(torch.autograd.Function):
     """
@@ -232,8 +253,6 @@ class All_Reduce(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_output):
-        # grad_output: [..., dim]
-        # Just return grad_output as is (no communication needed)
         return grad_output, None  # gradient for (x, group)
 
 # Optional: Add row-parallel linear for future use
@@ -256,7 +275,7 @@ class RowParallelLinear(nn.Module):
             self.proj.weight.copy_(weight_slice.to(self.device))
         
         # Bias only on first rank to avoid duplication
-        if bias_slice is not None and dist.get_rank(self.tp_group) == 0:
+        if bias_slice is not None:
             self.bias = nn.Parameter(bias_slice.to(self.device))
         else:
             self.bias = None
@@ -278,7 +297,7 @@ class RowParallelLinear(nn.Module):
         local_out = self.proj(inp)
         
         # All-reduce across TP group
-        All_Reduce.apply(local_out, self.tp_group)
+        local_out = All_Reduce.apply(local_out, self.tp_group)
         
         if self.bias is not None:
             local_out = local_out + self.bias
