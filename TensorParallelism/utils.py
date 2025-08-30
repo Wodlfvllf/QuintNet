@@ -116,7 +116,7 @@ class ColumnParallelLinear(nn.Module):
             # Useful if next layer expects local shard only
             return local_out
 
-def apply_tensor_parallel(model: nn.Module, tp_size: int, gather_output=True, sync_gradients=True):
+def apply_tensor_parallel(model: nn.Module, tp_size: int, gather_output=True, sync_gradients=True, method_of_parallelism="column"):
     """
     Replace every nn.Linear with a ColumnParallelLinear that holds its out_feature shard.
     Assumes dist.init_process_group() is already called and we're doing pure TP (no DP).
@@ -157,16 +157,27 @@ def apply_tensor_parallel(model: nn.Module, tp_size: int, gather_output=True, sy
                 if child.bias is not None:
                     bias_slice = child.bias[start:end]
 
-                shard = ColumnParallelLinear(
-                    local_device=local_device,
-                    tp_group=tp_group,
-                    in_features=in_f,
-                    out_features_per_rank=cols_per_rank,
-                    weight_slice=weight_slice,
-                    bias_slice=bias_slice,
-                    gather_output=gather_output,
-                    sync_gradients=sync_gradients,
-                )
+                if method_of_parallelism == "column":
+                    shard = ColumnParallelLinear(
+                        local_device=local_device,
+                        tp_group=tp_group,
+                        in_features=in_f,
+                        out_features_per_rank=cols_per_rank,
+                        weight_slice=weight_slice,
+                        bias_slice=bias_slice,
+                        gather_output=gather_output,
+                        sync_gradients=sync_gradients,
+                    )
+                else:
+                    shard = RowParallelLinear(  # For future use
+                        local_device=local_device,
+                        tp_group=tp_group,
+                        in_features_per_rank=in_f // tp_world_size,
+                        out_features=out_f,
+                        weight_slice=weight_slice,
+                        bias_slice=bias_slice,
+                        input_is_parallel=False,  # assuming input is not sharded
+                    )
 
                 # Swap in-place
                 setattr(module, name, shard)
