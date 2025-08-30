@@ -275,7 +275,7 @@ class RowParallelLinear(nn.Module):
             self.proj.weight.copy_(weight_slice.to(self.device))
         
         # Bias only on first rank to avoid duplication
-        if bias_slice is not None:
+        if bias_slice is not None and dist.get_rank(self.tp_group) == 0:
             self.bias = nn.Parameter(bias_slice.to(self.device))
         else:
             self.bias = None
@@ -283,18 +283,21 @@ class RowParallelLinear(nn.Module):
     def forward(self, x):
         if x.device != self.device:
             x = x.to(self.device, non_blocking=True)
-        rank = dist.get_rank(self.tp_group)
-        if x.dim() == 3:
-            # (batch, seq, hidden_dim)
-            inp = x[:, :, rank * self.in_features_per_rank : (rank + 1) * self.in_features_per_rank]
-        elif x.dim() == 2:
-            # (batch, hidden_dim) → add fake seq_len=1
-            inp = x[:, rank * self.in_features_per_rank : (rank + 1) * self.in_features_per_rank]
+        
+        if self.input_is_parallel:
+            # Input is already sharded, use directly
+            local_out = self.proj(x)
         else:
-            raise ValueError(f"Unexpected input shape: {x.shape}")
-
-
-        local_out = self.proj(inp)
+            # Input is replicated, slice it
+            rank = dist.get_rank(self.tp_group)
+            if x.dim() == 3:
+                inp = x[:, :, rank * self.in_features_per_rank : (rank + 1) * self.in_features_per_rank]
+            elif x.dim() == 2:
+                inp = x[:, rank * self.in_features_per_rank : (rank + 1) * self.in_features_per_rank]
+            else:
+                raise ValueError(f"Unexpected input shape: {x.shape}")
+            
+            local_out = self.proj(inp)
         
         # All-reduce across TP group
         local_out = All_Reduce.apply(local_out, self.tp_group)
