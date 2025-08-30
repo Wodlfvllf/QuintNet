@@ -4,7 +4,7 @@ QuintNet is a research-oriented PyTorch framework designed to explore and implem
 
 We start with Tensor Parallelism as the foundational module and plan to progressively integrate other strategies like Pipeline, Sequence, Expert/MoE, and Data Parallelism. This allows users to experiment with hybrid approaches tailored to their models and hardware.
 
-![QuintNet Logo or Banner](https://github.com/Wodlfvllf/QuintNet/tree/main/imgs/Quintnet.jpeg) <!-- Replace with actual logo if available -->
+![QuintNet Logo or Banner](https://github.com/Wodlfvllf/QuintNet/blob/main/imgs/Quintnet.jpeg) <!-- Replace with actual logo if available -->
 
 ## 🔥 Motivation: Why 5D Parallelism?
 
