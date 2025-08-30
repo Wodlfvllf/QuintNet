@@ -175,7 +175,7 @@ def apply_tensor_parallel(model: nn.Module, tp_size: int, gather_output=True, sy
                     weight_slice = child.weight[:, start:end]  # (cols_per_rank, in_f)
                     bias_slice = None
                     if child.bias is not None:
-                        bias_slice = child.bias[start:end]
+                        bias_slice = child.bias
                         
                     shard = RowParallelLinear(  # For future use
                         local_device=local_device,
