@@ -187,6 +187,36 @@ def apply_tensor_parallel(model: nn.Module, tp_size: int, gather_output=True, sy
     return model
 
 
+
+class All_Reduce(torch.autograd.Function):
+    """
+    Forward:
+      - local x: shape [..., dim]
+      - returns reduced tensor [..., dim] (SUM across TP group)
+
+    Backward:
+      - each rank gets identical grad_output, so just return it (no comm)
+    """
+
+    @staticmethod
+    def forward(ctx, x, group):
+        # Save the group (non-tensor) on ctx for backward.
+        ctx.tp_group = group
+
+        # ensure contiguous and device-correct
+        out = x.contiguous()
+
+        # all-reduce: sum across TP group
+        dist.all_reduce(out, op=dist.ReduceOp.SUM, group=group)
+
+        return out
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        # grad_output: [..., dim]
+        # Just return grad_output as is (no communication needed)
+        return grad_output, None  # gradient for (x, group)
+
 # Optional: Add row-parallel linear for future use
 class RowParallelLinear(nn.Module):
     """
@@ -199,6 +229,7 @@ class RowParallelLinear(nn.Module):
         self.device = local_device
         self.tp_group = tp_group
         self.input_is_parallel = input_is_parallel
+        self.in_features_per_rank = in_features_per_rank
 
         self.proj = nn.Linear(in_features_per_rank, out_features, bias=False, device=self.device)
         
@@ -215,10 +246,13 @@ class RowParallelLinear(nn.Module):
         if x.device != self.device:
             x = x.to(self.device, non_blocking=True)
 
-        local_out = self.proj(x)
+        rank = dist.get_rank(self.tp_group)
+        inp = x[:, :, rank * self.in_features_per_rank : (rank + 1) * self.in_features_per_rank]
+
+        local_out = self.proj(inp)
         
         # All-reduce across TP group
-        dist.all_reduce(local_out, op=dist.ReduceOp.SUM, group=self.tp_group)
+        All_Reduce.apply(local_out, self.tp_group)
         
         if self.bias is not None:
             local_out = local_out + self.bias
