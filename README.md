@@ -43,7 +43,7 @@ QuintNet's hybrid approach allows mixing these for scenarios like:
 - **Scalability**: Linear scaling in memory and compute; supports single-node multi-GPU and multi-node clusters.
 - **Educational Focus**: Clean code with comments, examples, and docs for learning distributed DL.
 - **Implemented Modules**:
-  - **Tensor Parallelism (✅ Done)**: Efficient sharding of linear layers (column/row parallel) with optimized comm primitives (All_Gather, All_Reduce, ReduceScatter). See [TensorParallelism/README.md](QuintNet/TensorParallelism/README.md) for details.
+  - **Tensor Parallelism (✅ Done)**: Efficient sharding of linear layers (column/row parallel) with optimized comm primitives (All_Gather, All_Reduce, ReduceScatter). See [TensorParallelism/README.md](https://github.com/Wodlfvllf/QuintNet/blob/main/TensorParallelism/README.md) for details.
 - **Work-in-Progress (WIP)**:
   - Pipeline Parallelism: Layer partitioning with micro-batching.
 - **Planned**:
