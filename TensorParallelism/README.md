@@ -63,11 +63,7 @@ conda install -y -c pytorch pytorch torchvision torchaudio cpuonly
 ```bash
 # From repo root (/workspace)
 pip install -r requirements.txt 2>/dev/null || echo "No requirements.txt found — skipping"
-# make the package importable for development
-pip install -e .
 ```
-
-> `pip install -e .` assumes there is a `setup.py` or `pyproject.toml`. If not, just `PYTHONPATH=. python ...` will also let you import `QuintNet`.
 
 ### 4. Verify GPUs & PyTorch
 

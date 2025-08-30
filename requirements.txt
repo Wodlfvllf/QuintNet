@@ -1,0 +1,15 @@
+# QuintNet requirements (core Python packages)
+
+# NOTE: Do NOT install torch via pip here. Install PyTorch with the correct CUDA support using conda
+
+# as shown in README.md (e.g. `conda install -c pytorch -c nvidia pytorch pytorch-cuda=12.1`).
+
+numpy
+tqdm
+datasets
+transformers
+sentence-transformers
+accelerate
+safetensors
+matplotlib
+scipy
