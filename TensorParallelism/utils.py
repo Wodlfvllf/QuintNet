@@ -147,17 +147,17 @@ def apply_tensor_parallel(model: nn.Module, tp_size: int, gather_output=True, sy
                     print(f"Warning: {current_path} out_features {out_f} not divisible by tp_size {tp_world_size}")
                     continue  # Skip this layer
 
-                cols_per_rank = out_f // tp_world_size
-
-                start = tp_rank * cols_per_rank
-                end   = (tp_rank + 1) * cols_per_rank
-
-                weight_slice = child.weight[start:end, :]  # (cols_per_rank, in_f)
-                bias_slice = None
-                if child.bias is not None:
-                    bias_slice = child.bias[start:end]
-
                 if method_of_parallelism == "column":
+                    cols_per_rank = out_f // tp_world_size
+
+                    start = tp_rank * cols_per_rank
+                    end   = (tp_rank + 1) * cols_per_rank
+
+                    weight_slice = child.weight[start:end, :]  # (cols_per_rank, in_f)
+                    bias_slice = None
+                    if child.bias is not None:
+                        bias_slice = child.bias[start:end]
+                    
                     shard = ColumnParallelLinear(
                         local_device=local_device,
                         tp_group=tp_group,
@@ -169,10 +169,18 @@ def apply_tensor_parallel(model: nn.Module, tp_size: int, gather_output=True, sy
                         sync_gradients=sync_gradients,
                     )
                 else:
+                    rows_per_rank = in_f // tp_world_size
+                    start = tp_rank * rows_per_rank
+                    end   = (tp_rank + 1) * rows_per_rank
+                    weight_slice = child.weight[:, start:end]  # (cols_per_rank, in_f)
+                    bias_slice = None
+                    if child.bias is not None:
+                        bias_slice = child.bias[start:end]
+                        
                     shard = RowParallelLinear(  # For future use
                         local_device=local_device,
                         tp_group=tp_group,
-                        in_features_per_rank=in_f // tp_world_size,
+                        in_features_per_rank=rows_per_rank,
                         out_features=out_f,
                         weight_slice=weight_slice,
                         bias_slice=bias_slice,
