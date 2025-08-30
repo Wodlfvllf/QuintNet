@@ -303,3 +303,32 @@ class RowParallelLinear(nn.Module):
             local_out = local_out + self.bias
             
         return local_out
+    
+    
+class VocabParallelEmbedding(nn.Module):
+    """Vocabulary-parallel embedding layer"""
+    def __init__(self, local_device, tp_group, num_embeddings, embedding_dim, 
+                 vocab_start_idx, vocab_end_idx, weight_slice):
+        super().__init__()
+        self.device = local_device
+        self.tp_group = tp_group
+        self.vocab_start_idx = vocab_start_idx
+        self.vocab_end_idx = vocab_end_idx
+        
+        local_vocab_size = vocab_end_idx - vocab_start_idx
+        self.embedding = nn.Embedding(local_vocab_size, embedding_dim, device=self.device)
+        
+        with torch.no_grad():
+            self.embedding.weight.copy_(weight_slice.to(self.device))
+    
+    def forward(self, input_ids):
+        # Mask out tokens not in this rank's vocabulary range
+        mask = (input_ids >= self.vocab_start_idx) & (input_ids < self.vocab_end_idx)
+        masked_input = input_ids - self.vocab_start_idx
+        masked_input = masked_input * mask
+        
+        embeddings = self.embedding(masked_input)
+        embeddings = embeddings * mask.unsqueeze(-1).float()  # Zero out invalid positions
+        
+        # All-reduce to combine embeddings from all ranks
+        return All_Reduce.apply(embeddings, self.tp_group)
