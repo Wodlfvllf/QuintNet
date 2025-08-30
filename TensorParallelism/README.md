@@ -118,21 +118,14 @@ torchrun \
   -m Mnist_Digit_Classification.TP_training
 ```
 
-### If using `train.py` as module
-
-```bash
-torchrun --nproc_per_node=2 -m Mnist_Digit_Classification.train
-```
-
 ---
 
 ## 🧩 Typical workflow / checklist
 
 1. Create conda env and install PyTorch (match CUDA).
-2. `pip install -e .` in repo root or set `PYTHONPATH=.` for imports.
-3. Ensure `dist.init_process_group(...)` is called in the entrypoint (TP\_training does this).
-4. Run with `torchrun --nproc_per_node=<#GPUs> -m path.to.module`.
-5. If you see rank / NCCL warnings, ensure you set `torch.cuda.set_device(local_rank)` in each process and use `nccl` backend on GPUs.
+2. Ensure `dist.init_process_group(...)` is called in the entrypoint (TP\_training does this).
+3. Run with `torchrun --nproc_per_node=<#GPUs> -m path.to.module`.
+4. If you see rank / NCCL warnings, ensure you set `torch.cuda.set_device(local_rank)` in each process and use `nccl` backend on GPUs.
 
 ---
 
@@ -160,7 +153,7 @@ QuintNet/TensorParallelism/
 ---
 
 ## 📚 Further reading & examples
-
+* Read through `DOCUMENT.MD` carefully to see what is being done and get wholesome knowledge.
 * See `Mnist_Digit_Classification/TP_training.py` for a worked example using the library.
 * Example: run `python -m Mnist_Digit_Classification.TP_training` for single-process debugging; run via `torchrun` for multi-GPU.
 
