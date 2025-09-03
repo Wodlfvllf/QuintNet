@@ -8,7 +8,6 @@ from ..backends.torch_backend import TorchDistributedBackend
 from ..components.bucket_manager import BucketManager
 from ..components.gradient_reducer import GradientReducer
 from ..components.parameter_broadcaster import ParameterBroadcaster
-from ..components.model_analyzer import ModelAnalyzer
 from .config import DistributedConfig, BucketConfig, ReductionStrategy
 
 class CustomDDP(nn.Module):
@@ -35,7 +34,6 @@ class CustomDDP(nn.Module):
         self.bucket_manager = BucketManager(self.bucket_config)
         self.gradient_reducer = GradientReducer(self.backend, self.distributed_config, reduction_strategy)
         self.parameter_broadcaster = ParameterBroadcaster(self.backend, self.distributed_config)
-        self.model_analyzer = ModelAnalyzer()
         
         # Setup
         self._setup()
@@ -71,14 +69,6 @@ class CustomDDP(nn.Module):
     def get_bucket_info(self) -> List[Tuple[int, int, float]]:
         """Get information about gradient buckets."""
         return self.bucket_manager.get_bucket_info()
-    
-    def get_parameter_memory_table(self) -> List[Tuple[str, int, float]]:
-        """Get parameter memory usage table."""
-        return self.model_analyzer.get_parameter_memory_table(self.model)
-    
-    def print_memory_summary(self) -> None:
-        """Print model memory summary."""
-        self.model_analyzer.print_memory_summary(self.model)
     
     def __del__(self):
         """Cleanup hooks when object is destroyed."""
