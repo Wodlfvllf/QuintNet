@@ -1,190 +1,235 @@
 # QuintNet — Towards 5D Parallelism for Scalable Deep Learning
 
-QuintNet is a research-oriented PyTorch framework designed to explore and implement multi-dimensional parallelism strategies for distributed deep learning. Our goal is to enable efficient training and inference of massive foundation models that exceed the capacity of single GPUs or even single nodes. By combining multiple parallelism dimensions—often referred to as "5D Parallelism"—QuintNet provides a modular, extensible toolkit for scaling deep learning workflows across clusters.
+QuintNet is a research-oriented PyTorch framework designed to explore and implement multi-dimensional parallelism strategies for distributed deep learning. Our goal is to enable efficient training and inference of massive foundation models that exceed the capacity of single GPUs or even single nodes. By combining five distinct parallelism dimensions—**5D Parallelism**—QuintNet provides a modular, extensible toolkit for scaling deep learning workflows across clusters.
 
-We start with Tensor Parallelism as the foundational module and plan to progressively integrate other strategies like Pipeline, Sequence, Expert/MoE, and Data Parallelism. This allows users to experiment with hybrid approaches tailored to their models and hardware.
+Starting with **Data Parallelism** and **Tensor Parallelism** as foundational modules, we plan to progressively integrate Sequence/Context, Pipeline, and Expert Parallelism. This allows users to experiment with hybrid approaches tailored to their models and hardware constraints.
 
-![QuintNet Logo or Banner](https://github.com/Wodlfvllf/QuintNet/blob/main/imgs/Quintnet.jpeg) <!-- Replace with actual logo if available -->
+![QuintNet Logo](https://github.com/Wodlfvllf/QuintNet/blob/main/imgs/Quintnet.jpeg)
 
-## 🔥 Motivation: Why 5D Parallelism?
+## 🔥 The 5D Parallelism Strategy
 
-Modern AI models (e.g., large language models like GPT or vision transformers) have billions or trillions of parameters, demanding enormous memory and compute resources. Training them efficiently requires distributing the workload across multiple devices. Traditional single-strategy parallelism often hits bottlenecks:
+Modern AI models demand unprecedented computational resources. Traditional single-strategy parallelism approaches hit fundamental bottlenecks when scaling to trillion-parameter models. **5D Parallelism** addresses this by distributing computation across five distinct dimensions:
 
-- **Data Parallelism (DP)**: Replicates the model across devices, each processing different data batches. Great for throughput but memory-intensive.
-- **Model Parallelism (MP)**: Splits the model layers across devices. Reduces memory per device but increases communication latency.
-- **Tensor Parallelism (TP)**: Shards individual layers (e.g., linear weights) across devices. Enables intra-layer parallelism for better utilization.
-- **Pipeline Parallelism (PP)**: Divides the model into stages, pipelining mini-batches through them. Balances load but can suffer from bubble inefficiencies.
-- **Expert/MoE Parallelism**: Routes inputs to sparse "experts" (sub-models), scaling capacity without full activation.
+### **1. Data Parallelism (DP) — Along the Batch Dimension**
+- **Strategy**: Replicate the model across devices, each processing different data batches
+- **Benefits**: High throughput, simple implementation, excellent scaling for large batch sizes
+- **Trade-offs**: Memory-intensive (full model replication), communication overhead for gradient synchronization
+- **Best For**: Models that fit in single GPU memory, throughput-critical applications
 
-**5D Parallelism** combines these (DP + MP + TP + PP + MoE) for optimal scaling. QuintNet aims to make this accessible in PyTorch, inspired by frameworks like DeepSpeed and Megatron-LM, but with a focus on simplicity, modularity, and educational value.
+### **2. Tensor Parallelism (TP) — Along the Hidden Dimension**
+- **Strategy**: Shard individual layers (weights, activations) across devices within the same forward/backward pass
+- **Benefits**: Enables training models larger than single GPU memory, fine-grained parallelism
+- **Trade-offs**: High communication frequency, requires careful synchronization
+- **Best For**: Large models with memory constraints, low-latency inference
 
-Visualizing the strategies:
+### **3. Sequence/Context Parallelism (SP/CP) — Along the Sequence Dimension**
+- **Strategy**: Distribute long sequences across devices, particularly for attention mechanisms
+- **Benefits**: Enables extremely long context lengths, reduces memory per device for sequence processing
+- **Trade-offs**: Complex attention computation distribution, sequence-dependent operations
+- **Best For**: Long-context transformers, document-level processing, time-series models
 
-```
-Data Parallelism:     Model Parallelism:      Tensor Parallelism:     Pipeline Parallelism:   Expert/MoE Parallelism:
-┌─────┬─────┬─────┐   ┌─────┐ ┌─────┐         ┌───┬───┬───┬───┐       ┌───┬───┐ ┌───┬───┐      ┌───┐ ┌───┐ ┌───┐
-│  M  │  M  │  M  │   │  L1 │ │  L2 │   →     │ L │ L │ L │ L │  →    │ S │ S │ │ S │ S │  →   │ E │ │ E │ │ E │
-│  o  │  o  │  o  │   │  L2 │ │  L3 │         │ 1 │ 1 │ 1 │ 1 │       │ t │ t │ │ t │ t │      │ x │ │ x │ │ x │
-│  d  │  d  │  d  │   │  L3 │ │  L4 │         └───┴───┴───┴───┘       └───┴───┘ └───┴───┘      └───┘ └───┘ └───┘
-│  e  │  e  │  e  │   └─────┘ └─────┘         Split inside layer      Split by pipeline      Experts/Mixture routing
-└─────┴─────┴─────┘   Sequential execution    Parallel execution      Stage execution        Conditional parallelism
-Different data        Different layers        Same layer split        Sequential stages      Sparse activation
-```
+### **4. Pipeline Parallelism (PP) — Along the Model Layers**
+- **Strategy**: Partition model layers across devices, creating a pipeline of forward/backward passes
+- **Benefits**: Scales to very deep models, reduces memory per device significantly
+- **Trade-offs**: Pipeline bubbles reduce efficiency, requires micro-batching for optimal utilization
+- **Best For**: Very deep networks, memory-constrained environments with many devices
 
-QuintNet's hybrid approach allows mixing these for scenarios like:
-- TP + PP for large transformers.
-- MoE + DP for sparse, high-capacity models.
-- Full 5D for extreme-scale training (e.g., on 1000+ GPUs).
+### **5. Expert Parallelism (EP) — Along the Model Experts**
+- **Strategy**: Route different inputs to specialized expert sub-models distributed across devices
+- **Benefits**: Massive parameter scaling with sparse activation, conditional computation
+- **Trade-offs**: Load balancing challenges, routing overhead, expert utilization optimization
+- **Best For**: Mixture-of-Experts models, extremely large capacity requirements
 
-## ✨ Key Features & Highlights
+## 🎯 Why 5D Parallelism Matters
 
-- **Modular Design**: Each parallelism strategy is a self-contained module, easy to mix and match.
-- **PyTorch-Native**: Builds on `torch.distributed` with custom autograd-aware ops for minimal overhead.
-- **Scalability**: Linear scaling in memory and compute; supports single-node multi-GPU and multi-node clusters.
-- **Educational Focus**: Clean code with comments, examples, and docs for learning distributed DL.
-- **Implemented Modules**:
-  - **Tensor Parallelism (✅ Done)**: Efficient sharding of linear layers (column/row parallel) with optimized comm primitives (All_Gather, All_Reduce, ReduceScatter). See [TensorParallelism/README.md](https://github.com/Wodlfvllf/QuintNet/blob/main/TensorParallelism/README.md) for details.
-- **Work-in-Progress (WIP)**:
-  - Pipeline Parallelism: Layer partitioning with micro-batching.
-- **Planned**:
-  - Sequence Parallelism: Sharding along sequence dims for long-context models.
-  - Expert/MoE Parallelism: Token routing to experts with load balancing.
-  - Data Parallelism Enhancements: Integration with DDP/ZeRO for hybrid setups.
-  - Orchestrator: Auto-config for combining strategies based on model/hardware.
+Each parallelism dimension addresses different scaling bottlenecks:
+
+- **Memory Bottlenecks**: TP, PP, and SP reduce per-device memory requirements
+- **Communication Bottlenecks**: Strategic combination minimizes cross-device traffic
+- **Utilization Bottlenecks**: EP and PP enable better hardware utilization patterns
+- **Scalability Bottlenecks**: Combined strategies enable linear scaling to thousands of devices
+
+**QuintNet's Vision**: Enable seamless combination of all five dimensions, automatically optimizing the parallelism strategy based on model architecture, hardware topology, and performance requirements.
+
+## ✨ Key Features & Implementation Status
+
+### **Framework Characteristics**
+- **Modular Architecture**: Each parallelism strategy is independently implementable and composable
+- **PyTorch-Native**: Built on `torch.distributed` with minimal external dependencies
+- **Research-Oriented**: Clean, well-documented implementations for educational and experimental use
+- **Production-Ready**: Performance-optimized with real-world deployment considerations
+
+### **Implementation Status**
+
+#### **✅ Completed Modules**
+- **Data Parallelism**: Advanced custom DDP implementation with gradient bucketing, modular backends, and optimized communication patterns
+- **Tensor Parallelism**: Efficient weight sharding for linear layers with autograd-aware communication primitives (All_Gather, All_Reduce, ReduceScatter)
+
+#### **🚧 In Development**
+- **Pipeline Parallelism**: Layer partitioning with micro-batching and bubble minimization strategies
+
+#### **📋 Planned Modules**
+- **Sequence/Context Parallelism**: Attention mechanism distribution for long-context models
+- **Expert Parallelism**: MoE routing with load balancing and expert placement optimization
+- **5D Orchestrator**: Automatic configuration system for optimal parallelism strategy selection
 
 ## 📂 Repository Structure
 
 ```
 QuintNet/
-├── TensorParallelism/          # Tensor parallelism module
-│   ├── comm_ops.py             # Autograd-aware communication primitives
-│   ├── layers.py               # Parallel layers (e.g., ColumnParallelLinear)
-│   ├── rewrite.py              # Model rewriting utilities
-│   ├── processgroup.py         # Process group management
-│   ├── utils.py                # Helpers
-│   └── README.md               # Submodule docs
-├── Mnist_Digit_Classification/ # Example training scripts
-│   ├── TP_training.py          # Tensor-parallel entrypoint
-│   ├── train.py                # Single-device training
-│   └── ...                     # Models, datasets
-├── Dataset/                    # Sample datasets (e.g., MNIST)
-├── test.py                     # Quick tests
-├── DOCUMENT.MD                 # In-depth technical notes
-├── CONTRIBUTING.md             # Contribution guidelines
-├── requirements.txt            # Dependencies
-└── README.md                   # This file
+├── QuintNet/                   # Main framework package
+│   ├── DataParallelism/        # ✅ Data parallelism implementation
+│   │   ├── core/               # Core DDP logic and configuration
+│   │   ├── components/         # Modular components (buckets, reducers, broadcasters)
+│   │   ├── backends/           # Communication backend abstractions
+│   │   ├── utils/              # Factory functions and utilities
+│   │   ├── tests/              # Comprehensive test suite
+│   │   └── ddp_wrapper.py      # High-level API wrapper
+│   ├── TensorParallelism/      # ✅ Tensor parallelism implementation
+│   │   ├── comm_ops.py         # Communication primitives
+│   │   ├── layers.py           # Parallel layer implementations
+│   │   ├── rewrite.py          # Model transformation utilities
+│   │   ├── processgroup.py     # Process group management
+│   │   └── utils.py            # Helper functions
+│   ├── PipelineParallelism/    # 🚧 Pipeline parallelism (in development)
+│   ├── SequenceParallelism/    # 📋 Sequence/context parallelism (planned)
+│   ├── ExpertParallelism/      # 📋 Expert/MoE parallelism (planned)
+│   ├── Orchestrator/           # 📋 5D strategy optimization (planned)
+│   ├── imgs/                   # Documentation assets
+│   └── requirements.txt        # Framework dependencies
+├── Mnist-Digit-Classification/ # Training examples and benchmarks
+│   ├── Base_training/          # Single-device baseline
+│   ├── Training_Data_Parallelism/     # Data parallel examples
+│   ├── Training_Tensor_Parallelism/   # Tensor parallel examples
+│   ├── Training_Pipeline_Parallelism/ # Pipeline parallel examples (coming soon)
+│   └── utilities/              # Shared training utilities
+├── dataset/                    # Example datasets
+├── benchmarks/                 # Performance benchmarking suite
+└── docs/                       # Comprehensive documentation
 ```
 
 ## 🚀 Quick Start
 
-### 1. Environment Setup (Conda Recommended for GPU/CUDA)
-
-Create a fresh environment:
+### Environment Setup
+Create and activate a conda environment with PyTorch and distributed training support:
 
 ```bash
 conda create -n quintnet python=3.11 -y
 conda activate quintnet
-```
 
-Install PyTorch (match your CUDA version—check with `nvidia-smi`):
-
-For CUDA 12.1:
-```bash
+# Install PyTorch with CUDA support (adjust for your CUDA version)
 conda install -y -c pytorch -c nvidia pytorch torchvision torchaudio pytorch-cuda=12.1
+
+# Install framework dependencies
+pip install -r QuintNet/requirements.txt
 ```
 
-For CUDA 11.8:
+### Training Examples
+
+#### Single Device Baseline
 ```bash
-conda install -y -c pytorch -c nvidia pytorch torchvision torchaudio pytorch-cuda=11.8
+python -m Mnist-Digit-Classification.Base_training.train
 ```
 
-CPU-only:
+#### Data Parallel Training
 ```bash
-conda install -y -c pytorch pytorch torchvision torchaudio cpuonly
+# Single node, multiple GPUs
+torchrun --standalone --nproc_per_node=4 \
+  -m Mnist-Digit-Classification.Training_Data_Parallelism.train_ddp
+
+# Multi-node distributed training
+torchrun --nproc_per_node=8 --nnodes=4 --node_rank=0 \
+  --master_addr="10.0.0.1" --master_port=29500 \
+  -m Mnist-Digit-Classification.Training_Data_Parallelism.train_ddp
 ```
 
-Install dependencies:
+#### Tensor Parallel Training
 ```bash
-pip install -r requirements.txt
+# Intra-node tensor parallelism
+torchrun --standalone --nproc_per_node=2 \
+  -m Mnist-Digit-Classification.Training_Tensor_Parallelism.TP_training
 ```
 
-### 2. Verify Installation
+## 🏗️ Development Roadmap
 
-```bash
-python - <<'PY'
-import torch
-print("PyTorch Version:", torch.__version__)
-print("CUDA Available:", torch.cuda.is_available())
-print("GPU Count:", torch.cuda.device_count())
-if torch.cuda.is_available():
-    for i in range(torch.cuda.device_count()):
-        print(f"GPU {i}: {torch.cuda.get_device_name(i)}")
-PY
-```
+### **Phase 1: Foundation (Completed)**
+- ✅ Data Parallelism with advanced bucketing and communication optimization
+- ✅ Tensor Parallelism with efficient weight sharding and synchronization
+- ✅ Comprehensive testing framework and documentation
 
-### 3. Clone and Run Examples
+### **Phase 2: Other Parallelism (In Progress)**
+- 🚧 Pipeline Parallelism with micro-batching and schedule optimization
+- 📋 Sequence/Context Parallelism for long-context transformer models
+- 📋 Expert Parallelism with MoE routing and load balancing
 
-The training examples are in a companion repo: [Mnist-Digit-Classification](https://github.com/Wodlfvllf/Mnist-Digit-Classification).
+### **Phase 3: Integration and Optimization (Planned)**
+- 📋 Hybrid parallelism combinations (DP+TP, TP+PP, etc.)
+- 📋 Automatic strategy selection based on model and hardware characteristics
+- 📋 Advanced memory optimization techniques (ZeRO-style optimizations)
+- 📋 Communication optimization for various network topologies
 
-Single GPU/CPU:
-```bash
-python -m Mnist_Digit_Classification.train
-```
+## 📊 Performance Philosophy
 
-Multi-GPU (Tensor Parallelism, e.g., 2 GPUs):
-```bash
-torchrun --standalone --nproc_per_node=2 -m Mnist_Digit_Classification.TP_training
-```
+QuintNet prioritizes:
 
-For explicit control (multi-node ready):
-```bash
-torchrun \
-  --nproc_per_node=2 \
-  --nnodes=1 \
-  --node_rank=0 \
-  --master_addr="127.0.0.1" \
-  --master_port=29500 \
-  -m Mnist_Digit_Classification.TP_training
-```
+1. **Scalability**: Linear scaling across devices and nodes
+2. **Efficiency**: Minimal communication overhead and optimal memory utilization
+3. **Flexibility**: Easy combination of parallelism strategies
+4. **Debuggability**: Clear error messages and comprehensive logging
+5. **Educational Value**: Transparent implementations for learning and research
 
-## 🧩 Typical Workflow
+## 🎓 Educational Resources
 
-1. **Setup Env**: Follow Quick Start.
-2. **Init Distributed**: Use `dist.init_process_group(backend='nccl')` in your script.
-3. **Apply Parallelism**: `from QuintNet.TensorParallelism import apply_tensor_parallel; model = apply_tensor_parallel(model, tp_size=world_size)`.
-4. **Train**: Launch with `torchrun` for multi-process spawning.
-5. **Debug**: Set `local_rank` via env vars; log per-rank with `print(f"[Rank {rank}] ...")`.
+### Learning Path
+1. **Start with Data Parallelism**: Understand gradient synchronization and distributed optimization
+2. **Progress to Tensor Parallelism**: Learn intra-layer parallelism and communication patterns
+3. **Explore Pipeline Parallelism**: Master inter-layer parallelism and micro-batching
+4. **Advanced Topics**: Sequence parallelism for attention mechanisms and expert parallelism for MoE
 
-## 📝 Notes & Tips
+### Key Concepts Covered
+- Distributed training fundamentals
+- Communication primitive implementations
+- Gradient synchronization mechanisms
+- Memory optimization strategies
+- Autograd integration for custom operations
+- Process group management and topology awareness
 
-- **Choosing Strategies**: Start with Tensor Parallelism for intra-layer scaling. Combine with Pipeline for deep models.
-- **Debugging Distributed Code**: Use barriers (`dist.barrier()`) and assert shapes/values across ranks.
-- **Common Pitfalls**: Ensure inputs are replicated for TP; handle biases post-comm to avoid desync.
-- **Performance**: Monitor with `torch.profiler` for comm bottlenecks.
-- **Further Reading**: Check `DOCUMENT.MD` for technical deep-dive.
+## 🧪 Testing and Validation
 
-## 🏗️ Roadmap
-
-- [x] Tensor Parallelism (Column/Row sharding with custom ops)
-- [ ] Pipeline Parallelism (Micro-batching and scheduling)
-- [ ] Sequence Parallelism (Long-sequence handling)
-- [ ] Expert/MoE Parallelism (Routing and sparsity)
-- [ ] Full 5D Orchestrator (Auto-hybrid configs)
-- [ ] Benchmarks on large models (e.g., GPT-2 variants)
-- [ ] Multi-node support with SLURM integration
+QuintNet includes comprehensive testing for:
+- **Correctness**: Forward/backward pass numerical consistency
+- **Performance**: Communication overhead and scaling efficiency
+- **Robustness**: Error handling and fault tolerance
+- **Integration**: Compatibility across different parallelism combinations
 
 ## 🤝 Contributing
 
-We welcome contributions! See [CONTRIBUTING.md](CONTRIBUTING.md) for details. Focus areas: New parallel modules, unit tests, examples, or docs. Please add tests for forward/backward consistency.
+We welcome contributions across all areas:
+- **Core Implementations**: New parallelism strategies and optimizations
+- **Performance Improvements**: Communication efficiency and memory optimization
+- **Documentation**: Tutorials, examples, and API documentation  
+- **Testing**: Unit tests, integration tests, and benchmarking
+- **Research**: Novel parallelism strategies and hybrid approaches
+
+## 🔬 Research Applications
+
+QuintNet enables research in:
+- **Parallelism Strategy Optimization**: Automatic selection and tuning
+- **Communication Pattern Analysis**: Understanding bottlenecks in distributed training
+- **Memory Efficiency**: Novel approaches to memory optimization in distributed settings
 
 ## 🏆 Acknowledgments
 
-Inspired by:
-- PyTorch Distributed
-- DeepSpeed (Microsoft)
-- Megatron-LM (NVIDIA)
-- FairScale/FairSeq (Meta)
+QuintNet builds upon foundational work from:
+- **PyTorch Distributed**: Core distributed training infrastructure
+- **DeepSpeed** (Microsoft): Advanced optimization techniques and ZeRO memory optimization
+- **Megatron-LM** (NVIDIA): Pioneering tensor and pipeline parallelism implementations
+- **FairScale** (Meta): Modular parallelism components and experimental frameworks
+- **Alpa** (UC Berkeley): Automatic parallelization strategies
+- **PaLM** (Google): Large-scale training insights and expert parallelism
 
-QuintNet is built for experimentation—feel free to open issues or PRs!
+---
 
-⚡ From Tensor Parallelism to Full 5D: Scaling AI Together.
+⚡ **From Single GPU to Exascale: Democratizing 5D Parallelism for the AI Community**
+
+*QuintNet empowers researchers, practitioners, and students to explore the cutting edge of distributed deep learning through clean, modular, and high-performance implementations of state-of-the-art parallelism strategies.*
