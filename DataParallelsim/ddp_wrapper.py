@@ -2,9 +2,9 @@
 import torch
 import torch.distributed as dist
 from typing import Optional
+import torch.nn as nn
 
-
-class CustomDDP(object):
+class CustomDDP(nn.Module):
     """
     Minimal custom DDP-like wrapper demonstrating:
     - bucketed gradient hooks (tensor.register_hook)
@@ -24,6 +24,7 @@ class CustomDDP(object):
         find_unused_parameters: bool = False,
         gradient_as_bucket_view: bool = False,
     ):
+        super().__init__()
         self.model = model
         self.rank = rank
         self.world_size = world_size
@@ -200,3 +201,7 @@ class CustomDDP(object):
             total_bytes = numel * bpe
             rows.append((name, total_bytes, total_bytes / (1024 ** 2)))
         return rows
+    
+    # def train(self):
+    #     for child in self.model.children():
+    #         child.train()
