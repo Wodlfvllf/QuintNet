@@ -88,18 +88,35 @@ class PipelineParallelWrapper(nn.Module):
 
 
     def _divide_model_into_stages(self):
-        model_as_a_list = nn.ModuleList(self.model.children())
-        L = len(model_as_a_list) // self.num_stages
-        stages = nn.ModuleList()
-        start_idx = (self.rank * L) 
-        end_idx = ((self.rank + 1) * L)
-        if start_idx >= end_idx:
-            # make sure each stage has at least one op (might need rework for very small L)
-            end_idx = min(start_idx + 1, L)
-            
-        stage = self._make_stage_from_children(model_as_a_list, start_idx, end_idx, inclusive_end=False)
-        return stage
+        # 1) get modules as an ordered python list
+        if isinstance(self.model, nn.ModuleList):
+            modules = list(self.model)               # ModuleList supports iteration
+        else:
+            modules = list(self.model.children())    # fallback for other nn.Module wrappers
 
+        total = len(modules)
+        if total == 0:
+            raise ValueError("Model contains no child modules to split")
+
+        # 2) compute even split but give remainder to the LAST stage (so head stays on last)
+        per = total // self.num_stages
+        rem = total % self.num_stages
+
+        # base size per stage, then give remainder to final stage
+        sizes = [per] * self.num_stages
+        sizes[-1] += rem
+
+        # 3) compute start/end for this rank
+        start = sum(sizes[:self.rank])
+        end = start + sizes[self.rank]
+
+        # If this stage would be empty, return Identity() (safe no-op)
+        if start >= end:
+            return nn.Identity()
+
+        selected = modules[start:end]
+        return self._make_stage_from_module_list(selected)
+    
     def forward(self, input_tensor=None):
         return self.local_module(input_tensor)
     

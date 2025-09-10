@@ -4,6 +4,7 @@ from torch.autograd import Function
 import torch.nn as nn
 from .Processgroup import ProcessGroupManager
 from .pp_wrapper import PipelineParallelWrapper
+from .operations import Send, Recv
 
 class PipelineTrainer:
     def __init__(self, model: nn.ModuleList, pp_group, optimizer, criterion, device):
@@ -31,22 +32,30 @@ class PipelineTrainer:
         """
         self.model.train()
         self.optimizer.zero_grad()
-
+        # print(self.stage_idx, self.num_stages, self.rank, self.world_size)
         # Forward pass
         if self.stage_idx == 0:
             # First stage receives input data
+            print("rank - ", self.rank, " input - ", 'images shape - ', input_data.shape)
+            
             input_data = input_data.to(self.device)
             output = self.model(input_data)
+            print("rank - ", self.rank, " output - ", 'images shape - ', output.shape)
+
             # Send output to next stage
             Send.apply(output, (self.stage_idx + 1) % self.num_stages)
             return None, None  # No loss computed at first stage
 
-        elif self.stage_idx == self.num_stages - 1:
+        elif self.stage_idx == self.num_stages-1:
             # Last stage receives data from previous stage
             input_data = Recv.apply((self.stage_idx - 1) % self.num_stages, self.device.type)
+            print("rank - ", self.rank, " input - ", 'images shape - ', input_data.shape)
+            
             input_data = input_data.to(self.device)
             input_data.requires_grad = True
             output = self.model(input_data)
+            print("rank - ", self.rank, " output - ", 'images shape - ', output.shape)
+            
             loss = self.criterion(output, target.to(self.device))
             loss.backward()
             self.optimizer.step()
@@ -55,9 +64,13 @@ class PipelineTrainer:
         else:
             # Intermediate stages receive data from previous stage and send to next stage
             input_data = Recv.apply((self.stage_idx - 1) % self.num_stages, self.device.type)
+            print("rank - ", self.rank, " input - ", 'images shape - ', input_data.shape)
+
             input_data = input_data.to(self.device)
             input_data.requires_grad = True
             output = self.model(input_data)
+            print("rank - ", self.rank, " output - ", 'images shape - ', output.shape)
+            
             # Send output to next stage
             Send.apply(output, (self.stage_idx + 1) % self.num_stages)
             # output.backward(torch.zeros_like(output))  # Dummy backward to propagate gradients
@@ -75,11 +88,14 @@ class PipelineTrainer:
         total_samples = 0
 
         with torch.no_grad():
-            for data, target in val_loader:
+            for batch in val_loader:
+                images, targets = batch['image'], batch['label']
                 if self.stage_idx == 0:
                     # First stage receives input data
-                    data = data.to(self.device)
-                    output = self.model(data)
+                    print("rank - ", self.rank, " stage - ", self.stage_idx, 'images shape - ', images.shape)
+                    output = self.model(images.to(self.device))
+                    print("rank - ", self.rank, " stage - ", self.stage_idx, 'images shape - ', output.shape)
+                    
                     # Send output to next stage
                     Send.apply(output, (self.stage_idx + 1) % self.num_stages)
                     continue  # No loss computed at first stage
@@ -87,6 +103,7 @@ class PipelineTrainer:
                 elif self.stage_idx == self.num_stages - 1:
                     # Last stage receives data from previous stage
                     data = Recv.apply((self.stage_idx - 1) % self.num_stages, self.device.type)
+                    print("rank - ", self.rank, " stage - ", self.stage_idx, 'images shape - ', data.shape)
                     data = data.to(self.device)
                     output = self.model(data)
                     loss = self.criterion(output, target.to(self.device))
@@ -97,8 +114,11 @@ class PipelineTrainer:
                 else:
                     # Intermediate stages receive data from previous stage and send to next stage
                     data = Recv.apply((self.stage_idx - 1) % self.num_stages, self.device.type)
+                    print("rank - ", self.rank, " stage - ", self.stage_idx, 'images shape - ', data.shape)
                     data = data.to(self.device)
                     output = self.model(data)
+                    print("rank - ", self.rank, " stage - ", self.stage_idx, 'images shape - ', output.shape)
+                    
                     # Send output to next stage
                     Send.apply(output, (self.stage_idx + 1) % self.num_stages)
                     continue  # No loss computed at intermediate stages
