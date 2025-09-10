@@ -15,67 +15,92 @@ class PipelineTrainer:
         criterion: loss function
         device: device to run the model on
         """
-        self.model = PipelineParallelWrapper(model, pp_group).to(device)
-        self.optimizer = optimizer
-        self.criterion = criterion
+        self.pp_group = pp_group
         self.device = device
         self.rank = dist.get_rank(pp_group)
         self.world_size = dist.get_world_size(pp_group)
-        self.num_stages = self.world_size  # assume world_size == num_stages
-        self.stage_idx = self.rank  # direct mapping
+        self.num_stages = self.world_size
+        self.stage_idx = self.rank
+        
+        # Initialize model wrapper and move to device
+        self.model = PipelineParallelWrapper(model, pp_group).to(device)
+        self.optimizer = optimizer
+        self.criterion = criterion
+        
+        print(f"Initialized PipelineTrainer - Rank: {self.rank}, Stage: {self.stage_idx}")
 
     def train_step(self, input_data, target):
         """
         Perform a single training step with pipeline parallelism.
-        input_data: input tensor for the first stage (only for rank 0)
-        target: target tensor for loss computation (only for last stage)
+        input_data: input tensor for the first stage (only meaningful for rank 0)
+        target: target tensor for loss computation (only meaningful for last stage)
         """
         self.model.train()
         self.optimizer.zero_grad()
-        # print(self.stage_idx, self.num_stages, self.rank, self.world_size)
-        # Forward pass
+        
         if self.stage_idx == 0:
             # First stage receives input data
-            print("rank - ", self.rank, " input - ", 'images shape - ', input_data.shape)
+            print(f"Rank {self.rank}: Processing input with shape {input_data.shape}")
             
             input_data = input_data.to(self.device)
             output = self.model(input_data)
-            print("rank - ", self.rank, " output - ", 'images shape - ', output.shape)
+            print(f"Rank {self.rank}: Output shape {output.shape}")
 
-            # Send output to next stage
-            Send.apply(output, (self.stage_idx + 1) % self.num_stages)
-            return None, None  # No loss computed at first stage
+            # Send output to next stage if not last stage
+            if self.num_stages > 1:
+                Send.apply(output, (self.stage_idx + 1) % self.num_stages)
+            else:
+                # Single stage case - compute loss here
+                loss = self.criterion(output, target.to(self.device))
+                loss.backward()
+                self.optimizer.step()
+                acc = (output.argmax(dim=1) == target.to(self.device)).float().mean().item()
+                return loss.item(), acc
+            
+            return None, None
 
-        elif self.stage_idx == self.num_stages-1:
+        elif self.stage_idx == self.num_stages - 1:
             # Last stage receives data from previous stage
             input_data = Recv.apply((self.stage_idx - 1) % self.num_stages, self.device.type)
-            print("rank - ", self.rank, " input - ", 'images shape - ', input_data.shape)
+            print(f"Rank {self.rank}: Received input with shape {input_data.shape}")
             
             input_data = input_data.to(self.device)
-            input_data.requires_grad = True
-            output = self.model(input_data)
-            print("rank - ", self.rank, " output - ", 'images shape - ', output.shape)
+            # Enable gradients for backward pass
+            input_data.requires_grad_(True)
             
-            loss = self.criterion(output, target.to(self.device))
+            output = self.model(input_data)
+            print(f"Rank {self.rank}: Output shape {output.shape}")
+            
+            # Compute loss and backward pass
+            target = target.to(self.device)
+            loss = self.criterion(output, target)
             loss.backward()
+            
+            # Send gradients backward (this should be handled by your Send/Recv autograd)
+            # The gradient of input_data will be sent back automatically
+            
             self.optimizer.step()
-            acc = (output.argmax(dim=1) == target.to(self.device)).float().mean().item()
+            acc = (output.argmax(dim=1) == target).float().mean().item()
             return loss.item(), acc
+            
         else:
             # Intermediate stages receive data from previous stage and send to next stage
             input_data = Recv.apply((self.stage_idx - 1) % self.num_stages, self.device.type)
-            print("rank - ", self.rank, " input - ", 'images shape - ', input_data.shape)
+            print(f"Rank {self.rank}: Received input with shape {input_data.shape}")
 
             input_data = input_data.to(self.device)
-            input_data.requires_grad = True
+            input_data.requires_grad_(True)
+            
             output = self.model(input_data)
-            print("rank - ", self.rank, " output - ", 'images shape - ', output.shape)
+            print(f"Rank {self.rank}: Output shape {output.shape}")
             
             # Send output to next stage
             Send.apply(output, (self.stage_idx + 1) % self.num_stages)
-            # output.backward(torch.zeros_like(output))  # Dummy backward to propagate gradients
-            # self.optimizer.step()
-            return None, None  # No loss computed at intermediate stages
+            
+            # For intermediate stages, we need to wait for backward pass
+            # This should be handled automatically by the autograd system
+            self.optimizer.step()
+            return None, None
         
     def evaluate(self, val_loader):
         """
@@ -90,42 +115,57 @@ class PipelineTrainer:
         with torch.no_grad():
             for batch in val_loader:
                 images, targets = batch['image'], batch['label']
+                
                 if self.stage_idx == 0:
                     # First stage receives input data
-                    print("rank - ", self.rank, " stage - ", self.stage_idx, 'images shape - ', images.shape)
-                    output = self.model(images.to(self.device))
-                    print("rank - ", self.rank, " stage - ", self.stage_idx, 'images shape - ', output.shape)
+                    print(f"Eval - Rank {self.rank}: Input shape {images.shape}")
+                    images = images.to(self.device)
+                    output = self.model(images)
+                    print(f"Eval - Rank {self.rank}: Output shape {output.shape}")
                     
-                    # Send output to next stage
-                    Send.apply(output, (self.stage_idx + 1) % self.num_stages)
-                    continue  # No loss computed at first stage
+                    # Send output to next stage if not last stage
+                    if self.num_stages > 1:
+                        Send.apply(output, (self.stage_idx + 1) % self.num_stages)
+                    else:
+                        # Single stage case
+                        targets = targets.to(self.device)
+                        loss = self.criterion(output, targets)
+                        total_loss += loss.item() * images.size(0)
+                        total_correct += (output.argmax(dim=1) == targets).sum().item()
+                        total_samples += images.size(0)
+                    continue
 
                 elif self.stage_idx == self.num_stages - 1:
                     # Last stage receives data from previous stage
                     data = Recv.apply((self.stage_idx - 1) % self.num_stages, self.device.type)
-                    print("rank - ", self.rank, " stage - ", self.stage_idx, 'images shape - ', data.shape)
+                    print(f"Eval - Rank {self.rank}: Received shape {data.shape}")
+                    
                     data = data.to(self.device)
                     output = self.model(data)
-                    loss = self.criterion(output, target.to(self.device))
+                    
+                    targets = targets.to(self.device)
+                    loss = self.criterion(output, targets)
                     total_loss += loss.item() * data.size(0)
-                    total_correct += (output.argmax(dim=1) == target.to(self.device)).sum().item()
+                    total_correct += (output.argmax(dim=1) == targets).sum().item()
                     total_samples += data.size(0)
 
                 else:
                     # Intermediate stages receive data from previous stage and send to next stage
                     data = Recv.apply((self.stage_idx - 1) % self.num_stages, self.device.type)
-                    print("rank - ", self.rank, " stage - ", self.stage_idx, 'images shape - ', data.shape)
+                    print(f"Eval - Rank {self.rank}: Received shape {data.shape}")
+                    
                     data = data.to(self.device)
                     output = self.model(data)
-                    print("rank - ", self.rank, " stage - ", self.stage_idx, 'images shape - ', output.shape)
+                    print(f"Eval - Rank {self.rank}: Output shape {output.shape}")
                     
                     # Send output to next stage
                     Send.apply(output, (self.stage_idx + 1) % self.num_stages)
-                    continue  # No loss computed at intermediate stages
+                    continue
 
-        if self.stage_idx == self.num_stages - 1:
+        # Return results only from last stage (or single stage)
+        if self.stage_idx == self.num_stages - 1 or self.num_stages == 1:
             avg_loss = total_loss / total_samples if total_samples > 0 else 0.0
             accuracy = total_correct / total_samples if total_samples > 0 else 0.0
             return avg_loss, accuracy
         else:
-            return None, None  # Only last stage computes and returns loss and accuracy
+            return None, None
