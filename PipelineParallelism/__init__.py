@@ -1,9 +1,11 @@
 from .pp_wrapper import *
 from .Processgroup import *
 from .operations import Send, Recv
+from .pipeline_trainer import PipelineTrainer
 __all__ = [
     'PipelineParallelWrapper',
-    'ProcessGroupManager'
+    'ProcessGroupManager',
     'Send',
-    'Recv'
+    'Recv',
+    'PipelineTrainer'
 ]
