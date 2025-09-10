@@ -3,4 +3,6 @@ from .Processgroup import *
 __all__ = [
     'PipelineParallelWrapper',
     'ProcessGroupManager'
+    'Send',
+    'Recv'
 ]

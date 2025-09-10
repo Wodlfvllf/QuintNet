@@ -72,40 +72,6 @@ class Recv(Function):
         # returns two Nones corresponding to forward inputs (src, device)
         return None, None
 
-
-class PipelineStage(nn.Module):
-    def __init__(self, module: nn.Module, rank: int, world_size: int, stage_idx: int, num_stages: int):
-        super(PipelineStage, self).__init__()
-        self.module = module.to(next(module.parameters()).device if any(p.requires_grad for p in module.parameters()) else torch.device("cpu"))
-        self.rank = rank
-        self.world_size = world_size
-        self.stage_idx = stage_idx
-        self.num_stages = num_stages
-
-    def forward(self, input_tensor=None):
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        # First stage: compute and send to next
-        if self.stage_idx == 0:
-            assert input_tensor is not None, "First stage must be given input_tensor"
-            out = self.module(input_tensor)
-            if self.num_stages > 1:
-                # send out to next rank (stage)
-                Send.apply(out, self.rank + 1)
-            return out
-
-        # Last stage: receive from previous, compute output and return
-        if self.stage_idx == self.num_stages - 1:
-            inp = Recv.apply(self.rank - 1, device)
-            out = self.module(inp)
-            return out
-
-        # Middle stages: receive, compute, send
-        inp = Recv.apply(self.rank - 1, device)
-        out = self.module(inp)
-        Send.apply(out, self.rank + 1)
-        return out
-
-
 class PipelineParallelWrapper(nn.Module):
     def __init__(self, model: nn.ModuleList, pp_group):
         """
@@ -191,10 +157,10 @@ class PipelineParallelWrapper(nn.Module):
 
     def _divide_model_into_stages(self):
         model_as_a_list = nn.ModuleList(self.model.children())
-        L = len(model_as_a_list)
+        L = len(model_as_a_list) // self.num_stages
         stages = nn.ModuleList()
-        start_idx = (self.rank * L) // self.num_stages
-        end_idx = ((self.rank + 1) * L) // self.num_stages
+        start_idx = (self.rank * L) 
+        end_idx = ((self.rank + 1) * L)
         if start_idx >= end_idx:
             # make sure each stage has at least one op (might need rework for very small L)
             end_idx = min(start_idx + 1, L)
