@@ -122,15 +122,7 @@ class PipelineParallelWrapper(nn.Module):
         self.stage_idx = self.rank  # direct mapping
 
         # divide the module list into `num_stages` contiguous chunks and keep only local stage
-        stage_modules = self._divide_model_into_stages()
-        self.local_module = stage_modules[self.stage_idx]
-        self.pipeline_stage = PipelineStage(
-            module=self.local_module,
-            rank=self.rank,
-            world_size=self.world_size,
-            stage_idx=self.stage_idx,
-            num_stages=self.num_stages
-        )
+        self.local_module = self._divide_model_into_stages()
 
     def _make_stage_from_children(self, model: nn.Module, start_idx: int, end_idx: int, inclusive_end: bool = False) -> nn.Sequential:
         """
@@ -201,18 +193,17 @@ class PipelineParallelWrapper(nn.Module):
         model_as_a_list = nn.ModuleList(self.model.children())
         L = len(model_as_a_list)
         stages = nn.ModuleList()
-        for i in range(self.num_stages):
-            start_idx = (i * L) // self.num_stages
-            end_idx = ((i + 1) * L) // self.num_stages
-            if start_idx >= end_idx:
-                # make sure each stage has at least one op (might need rework for very small L)
-                end_idx = min(start_idx + 1, L)
-            stage = self._make_stage_from_children(model_as_a_list, start_idx, end_idx, inclusive_end=False)
-            stages.append(stage)
-        return stages
+        start_idx = (self.rank * L) // self.num_stages
+        end_idx = ((self.rank + 1) * L) // self.num_stages
+        if start_idx >= end_idx:
+            # make sure each stage has at least one op (might need rework for very small L)
+            end_idx = min(start_idx + 1, L)
+            
+        stage = self._make_stage_from_children(model_as_a_list, start_idx, end_idx, inclusive_end=False)
+        return stage
 
     def forward(self, input_tensor=None):
-        return self.pipeline_stage(input_tensor)
+        return self.local_module(input_tensor)
     
     def train(self, mode=True):
         self.local_module.train(mode)
