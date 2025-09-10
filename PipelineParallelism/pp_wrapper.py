@@ -106,17 +106,17 @@ class PipelineStage:
 
 
 class PipelineParallelWrapper:
-    def __init__(self, model: nn.ModuleList, num_stages: int):
+    def __init__(self, model: nn.ModuleList, pp_group):
         """
         model: torch.nn.ModuleList of layers/blocks (must be ModuleList for easy slicing)
         num_stages: number of pipeline stages (assume world_size == num_stages)
         """
         assert dist.is_initialized(), "torch.distributed must be initialized (init_process_group)"
         self.model = model
-        self.num_stages = num_stages
+        self.pp_group = pp_group
         self.rank = dist.get_rank()
-        self.world_size = dist.get_world_size()
-        assert self.world_size == num_stages, "This simple wrapper assumes world_size == num_stages"
+        self.world_size = dist.get_world_size(pp_group)
+        self.num_stages = self.world_size  # assume world_size == num_stages
         self.stage_idx = self.rank  # direct mapping
 
         # divide the module list into `num_stages` contiguous chunks and keep only local stage
