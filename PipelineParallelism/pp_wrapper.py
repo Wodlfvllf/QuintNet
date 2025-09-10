@@ -30,86 +30,95 @@ class PipelineParallelWrapper(nn.Module):
         
         print(f"Rank {self.rank}: Initialized stage {self.stage_idx}/{self.num_stages-1}")
 
+    def _flatten_model_layers(self, module):
+        """Recursively flatten all layers from a model, handling nested containers"""
+        flattened_layers = []
+        
+        for child_module in module.children():
+            if isinstance(child_module, (nn.ModuleList, nn.Sequential)):
+                # If it's a container, recursively flatten it
+                flattened_layers.extend(self._flatten_model_layers(child_module))
+            else:
+                # If it's a regular layer, add it directly
+                flattened_layers.append(child_module)
+        
+        return flattened_layers
+
+
     def _extract_layers_from_model(self, model):
-        """Extract layers from model into a ModuleList for splitting"""
-        layers = nn.ModuleList()
+        """Extract and flatten all layers from model"""
+        # Start with empty list and flatten everything
+        flattened_layers = self._flatten_model_layers(model)
         
-        # Check if model has expected Vision Transformer structure
-        if hasattr(model, 'patch_embedding'):
-            # Add patch embedding as first layer
-            layers.append(model.patch_embedding)
-            
-            # Add transformer blocks
-            if hasattr(model, 'blocks'):
-                for block in model.blocks:
-                    layers.append(block)
-            elif hasattr(model, 'layers'):
-                for layer in model.layers:
-                    layers.append(layer)
-            else:
-                # Try to find sequential blocks
-                for name, module in model.named_children():
-                    if 'block' in name.lower() or 'layer' in name.lower():
-                        layers.append(module)
-            
-            # Add layer norm if exists
-            if hasattr(model, 'ln') or hasattr(model, 'norm'):
-                norm_layer = getattr(model, 'ln', None) or getattr(model, 'norm', None)
-                if norm_layer:
-                    layers.append(norm_layer)
-            
-            # Add classification head as last layer
-            if hasattr(model, 'head') or hasattr(model, 'fc'):
-                head = getattr(model, 'head', None) or getattr(model, 'fc', None)
-                if head:
-                    layers.append(head)
-        else:
-            # Fallback: treat model as sequential or extract all children
-            if isinstance(model, nn.Sequential):
-                layers = nn.ModuleList(list(model))
-            elif isinstance(model, nn.ModuleList):
-                layers = model
-            else:
-                # Extract all meaningful children
-                for name, module in model.named_children():
-                    layers.append(module)
+        if len(flattened_layers) == 0:
+            raise ValueError("Could not extract any layers from model")
         
-        if len(layers) == 0:
-            raise ValueError("Could not extract layers from model")
-            
-        print(f"Extracted {len(layers)} layers from model")
+        # Convert to ModuleList for easy indexing
+        layers = nn.ModuleList(flattened_layers)
+        
+        print(f"Extracted {len(layers)} layers from model:")
+        for i, layer in enumerate(layers):
+            print(f"  Layer {i}: {type(layer).__name__}")
+        
         return layers
 
+
     def _divide_model_into_stages(self):
-        """Divide model layers into stages and return local stage"""
+        """Divide flattened layers into stages"""
         total_layers = len(self.model_layers)
         
-        # Calculate layers per stage
-        layers_per_stage = total_layers // self.num_stages
+        if total_layers < self.num_stages:
+            raise ValueError(f"Cannot split {total_layers} layers into {self.num_stages} stages.")
+        
+        # Simple division with remainder distribution
+        base_size = total_layers // self.num_stages
         remainder = total_layers % self.num_stages
         
-        # Distribute layers - give extra layers to later stages
-        stage_sizes = [layers_per_stage] * self.num_stages
-        for i in range(remainder):
-            stage_sizes[-(i+1)] += 1
+        # Calculate start index for this stage
+        start_idx = self.stage_idx * base_size + min(self.stage_idx, remainder)
         
-        # Calculate start and end indices for this stage
-        start_idx = sum(stage_sizes[:self.stage_idx])
-        end_idx = start_idx + stage_sizes[self.stage_idx]
+        # Calculate size for this stage (distribute remainder to first few stages)
+        stage_size = base_size + (1 if self.stage_idx < remainder else 0)
+        end_idx = start_idx + stage_size
         
         # Get layers for this stage
         stage_layers = self.model_layers[start_idx:end_idx]
         
         print(f"Rank {self.rank}: Stage {self.stage_idx} has layers [{start_idx}:{end_idx}] "
-              f"({len(stage_layers)} layers)")
+            f"({len(stage_layers)} layers)")
         
-        # Return as Sequential
-        if len(stage_layers) == 0:
-            return nn.Identity()
-        elif len(stage_layers) == 1:
+        # Print what layers are in this stage
+        for i, layer in enumerate(stage_layers):
+            global_idx = start_idx + i
+            print(f"  Layer {global_idx}: {type(layer).__name__}")
+        
+        # Return appropriate structure
+        if len(stage_layers) == 1:
             return stage_layers[0]
         else:
             return nn.Sequential(*stage_layers)
+
+
+    def _print_splitting_summary(self):
+        """Print summary of how layers are split across all stages"""
+        total_layers = len(self.model_layers)
+        base_size = total_layers // self.num_stages
+        remainder = total_layers % self.num_stages
+        
+        print(f"\n=== Model Splitting Summary ===")
+        print(f"Total layers: {total_layers}")
+        print(f"Number of stages: {self.num_stages}")
+        print(f"Base layers per stage: {base_size}")
+        print(f"Stages with extra layer: {remainder}")
+        
+        # Show distribution for all stages
+        for stage_id in range(self.num_stages):
+            start_idx = stage_id * base_size + min(stage_id, remainder)
+            stage_size = base_size + (1 if stage_id < remainder else 0)
+            end_idx = start_idx + stage_size
+            print(f"  Stage {stage_id}: layers [{start_idx}:{end_idx}] ({stage_size} layers)")
+        
+        print("=" * 40)
     
     def forward(self, x):
         """Forward pass through local stage"""

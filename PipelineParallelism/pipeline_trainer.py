@@ -44,16 +44,19 @@ class PipelineTrainer:
         """
         self.model.train()
         self.optimizer.zero_grad()
-        
+        flag = None
         # Forward pass
         if self.is_first_stage:
             # First stage: process input and send to next
             input_data = input_data.to(self.device)
             output = self.model(input_data)
-            
+            flag = output.shape
             if not self.is_last_stage:  # Multi-stage case
                 # Send output to next stage
+                print(f"Rank {self.rank}: Sending activations to stage {self.stage_idx + 1}")
                 Send.apply(output, self.stage_idx + 1, self.pp_group)
+                print(f"Rank {self.rank}: Activations sent, waiting for backward pass...")
+                
                 # First stage waits for gradient from next stage in backward pass
                 # The Send.backward will receive gradients automatically
             else:  # Single stage case
@@ -62,44 +65,50 @@ class PipelineTrainer:
                 loss.backward()
                 self.optimizer.step()
                 acc = (output.argmax(dim=1) == target.to(self.device)).float().mean().item()
+                print(f"Rank {self.rank}: Single stage training complete")
+
                 return loss.item(), acc * 100
                 
         elif self.is_last_stage:
             # Last stage: receive from previous, compute loss, start backward
             # Receive activations from previous stage
-            recv_data = Recv.apply(self.stage_idx - 1, self.device, self.pp_group)
+            print(f"Rank {self.rank}: Waiting for activations from stage {self.stage_idx - 1}")
+            recv_data = Recv.apply(self.stage_idx - 1, self.device, self.pp_group, flag)
             recv_data = recv_data.to(self.device)
             recv_data.requires_grad_(True)
-            
+            print(f"Rank {self.rank}: Received activations, shape: {recv_data.shape}")
             # Forward through last stage
             output = self.model(recv_data)
             
             # Compute loss
             target = target.to(self.device)
             loss = self.criterion(output, target)
-            
+            print(f"Rank {self.rank}: Starting backward pass with loss: {loss.item()}")
             # Backward pass - this will send gradients back through Recv.backward
             loss.backward()
             
             # Update parameters
             self.optimizer.step()
-            
+            print(f"Rank {self.rank}: Backward pass complete, updating parameters")
             acc = (output.argmax(dim=1) == target).float().mean().item()
+            print(f"Rank {self.rank}: Last stage training complete")
             return loss.item(), acc * 100
             
         else:
             # Intermediate stage: receive, forward, send
             # Receive from previous stage
-            recv_data = Recv.apply(self.stage_idx - 1, self.device, self.pp_group)
+            print(f"Rank {self.rank}: Waiting for activations from stage {self.stage_idx - 1}")
+            recv_data = Recv.apply(self.stage_idx - 1, self.device, self.pp_group, flag)
             recv_data = recv_data.to(self.device)
             recv_data.requires_grad_(True)
-            
+            print(f"Rank {self.rank}: Received activations, processing...")
             # Forward through this stage
             output = self.model(recv_data)
-            
+            print(f"Rank {self.rank}: Sending activations to stage {self.stage_idx + 1}")
             # Send to next stage
             Send.apply(output, self.stage_idx + 1, self.pp_group)
-            
+            print(f"Rank {self.rank}: Activations sent, waiting for backward pass...")
+            flag = output.shape
             # The backward pass will be triggered by gradients from next stage
             # coming through Send.backward, and will send gradients to previous
             # stage through Recv.backward
