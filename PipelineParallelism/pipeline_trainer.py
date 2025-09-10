@@ -18,7 +18,7 @@ class PipelineTrainer:
         self.optimizer = optimizer
         self.criterion = criterion
         self.device = device
-        self.rank = dist.get_rank()
+        self.rank = dist.get_rank(pp_group)
         self.world_size = dist.get_world_size(pp_group)
         self.num_stages = self.world_size  # assume world_size == num_stages
         self.stage_idx = self.rank  # direct mapping
@@ -39,7 +39,7 @@ class PipelineTrainer:
             output = self.model(input_data)
             # Send output to next stage
             Send.apply(output, (self.stage_idx + 1) % self.num_stages)
-            return None  # No loss computed at first stage
+            return None, None  # No loss computed at first stage
 
         elif self.stage_idx == self.num_stages - 1:
             # Last stage receives data from previous stage
@@ -50,7 +50,8 @@ class PipelineTrainer:
             loss = self.criterion(output, target.to(self.device))
             loss.backward()
             self.optimizer.step()
-            return loss.item()
+            acc = (output.argmax(dim=1) == target.to(self.device)).float().mean().item()
+            return loss.item(), acc
         else:
             # Intermediate stages receive data from previous stage and send to next stage
             input_data = Recv.apply((self.stage_idx - 1) % self.num_stages, self.device.type)
@@ -61,4 +62,50 @@ class PipelineTrainer:
             Send.apply(output, (self.stage_idx + 1) % self.num_stages)
             # output.backward(torch.zeros_like(output))  # Dummy backward to propagate gradients
             # self.optimizer.step()
-            return None  # No loss computed at intermediate stages
+            return None, None  # No loss computed at intermediate stages
+        
+    def evaluate(self, val_loader):
+        """
+        Evaluate the model on the validation set.
+        val_loader: DataLoader for validation data
+        """
+        self.model.eval()
+        total_loss = 0.0
+        total_correct = 0
+        total_samples = 0
+
+        with torch.no_grad():
+            for data, target in val_loader:
+                if self.stage_idx == 0:
+                    # First stage receives input data
+                    data = data.to(self.device)
+                    output = self.model(data)
+                    # Send output to next stage
+                    Send.apply(output, (self.stage_idx + 1) % self.num_stages)
+                    continue  # No loss computed at first stage
+
+                elif self.stage_idx == self.num_stages - 1:
+                    # Last stage receives data from previous stage
+                    data = Recv.apply((self.stage_idx - 1) % self.num_stages, self.device.type)
+                    data = data.to(self.device)
+                    output = self.model(data)
+                    loss = self.criterion(output, target.to(self.device))
+                    total_loss += loss.item() * data.size(0)
+                    total_correct += (output.argmax(dim=1) == target.to(self.device)).sum().item()
+                    total_samples += data.size(0)
+
+                else:
+                    # Intermediate stages receive data from previous stage and send to next stage
+                    data = Recv.apply((self.stage_idx - 1) % self.num_stages, self.device.type)
+                    data = data.to(self.device)
+                    output = self.model(data)
+                    # Send output to next stage
+                    Send.apply(output, (self.stage_idx + 1) % self.num_stages)
+                    continue  # No loss computed at intermediate stages
+
+        if self.stage_idx == self.num_stages - 1:
+            avg_loss = total_loss / total_samples if total_samples > 0 else 0.0
+            accuracy = total_correct / total_samples if total_samples > 0 else 0.0
+            return avg_loss, accuracy
+        else:
+            return None, None  # Only last stage computes and returns loss and accuracy

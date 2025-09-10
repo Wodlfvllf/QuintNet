@@ -3,6 +3,7 @@ import torch.distributed as dist
 from torch.autograd import Function
 import torch.nn as nn
 from .Processgroup import ProcessGroupManager
+
 class PipelineParallelWrapper(nn.Module):
     def __init__(self, model: nn.ModuleList, pp_group):
         """
