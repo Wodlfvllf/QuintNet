@@ -132,7 +132,7 @@ class PipelineParallelWrapper(nn.Module):
             num_stages=self.num_stages
         )
 
-    def _make_stage_from_children(model: nn.Module, start_idx: int, end_idx: int, inclusive_end: bool = False) -> nn.Sequential:
+    def _make_stage_from_children(self, model: nn.Module, start_idx: int, end_idx: int, inclusive_end: bool = False) -> nn.Sequential:
         """
         Build an nn.Sequential stage from model.children() between start_idx and end_idx.
         - start_idx: Python-style start index (can be 0).
