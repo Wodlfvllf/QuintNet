@@ -40,86 +40,66 @@ class PipelineTrainer:
     def train_step(self, input_data, target):
         """
         Perform a single training step with pipeline parallelism.
-        Uses simple forward-backward scheduling (no pipelining of microbatches).
         """
         self.model.train()
         self.optimizer.zero_grad()
-        flag = None
-        # Forward pass
+        print(f"Rank {self.rank}: Starting train_step...")
+        # --- FORWARD PASS ---
+        # All stages execute their part of the forward pass.
+        # The Send/Recv calls will block and synchronize the stages.
+        print("{rank}: is containing which stage? {stage}".format(rank=self.rank, stage=self.stage_idx))
         if self.is_first_stage:
-            # First stage: process input and send to next
-            input_data = input_data.to(self.device)
-            output = self.model(input_data)
-            # flag = output.shape
-            if not self.is_last_stage:  # Multi-stage case
-                
-                # Send output to next stage
-                print(f"Rank {self.rank}: Sending activations to stage {self.stage_idx + 1}")
+            output = self.model(input_data.to(self.device))
+            print(f"Rank {self.rank}: Completed forward pass.")
+            if not self.is_last_stage:
+                print(f"Rank {self.rank}: Sending data to next stage.")
                 Send.apply(output, self.stage_idx + 1, self.pp_group)
-                print(f"Rank {self.rank}: Activations sent, waiting for backward pass...")
-                
-                # First stage waits for gradient from next stage in backward pass
-                # The Send.backward will receive gradients automatically
-            else:  # Single stage case
-                # Compute loss and backward
-                loss = self.criterion(output, target.to(self.device))
-                loss.backward()
-                self.optimizer.step()
-                acc = (output.argmax(dim=1) == target.to(self.device)).float().mean().item()
-                print(f"Rank {self.rank}: Single stage training complete")
-
-                return loss.item(), acc * 100
-                
+                print(f"Rank {self.rank}: Data sent to next stage.")
         elif self.is_last_stage:
-            # Last stage: receive from previous, compute loss, start backward
-            # Receive activations from previous stage
-            print(f"Rank {self.rank}: Waiting for activations from stage {self.stage_idx - 1}")
-            recv_data = Recv.apply(self.stage_idx - 1, self.device, self.pp_group, flag)
-            recv_data = recv_data.to(self.device)
+            print(f"Rank {self.rank}: Receiving data from previous stage.")
+            recv_data = Recv.apply(self.stage_idx - 1, self.device, self.pp_group, input_data.dtype)
+            print(f"Rank {self.rank}: Data received from previous stage.")
             recv_data.requires_grad_(True)
-            print(f"Rank {self.rank}: Received activations, shape: {recv_data.shape}")
-            # Forward through last stage
+            print(f"Rank {self.rank}: Starting last stage forward pass.")
             output = self.model(recv_data)
-            
-            # Compute loss
-            target = target.to(self.device)
-            loss = self.criterion(output, target)
-            print(f"Rank {self.rank}: Starting backward pass with loss: {loss.item()}")
-            # Backward pass - this will send gradients back through Recv.backward
-            loss.backward()
-            
-            # Update parameters
-            self.optimizer.step()
-            print(f"Rank {self.rank}: Backward pass complete, updating parameters")
-            acc = (output.argmax(dim=1) == target).float().mean().item()
-            print(f"Rank {self.rank}: Last stage training complete")
-            return loss.item(), acc * 100
-            
-        else:
-            # Intermediate stage: receive, forward, send
-            # Receive from previous stage
-            print(f"Rank {self.rank}: Waiting for activations from stage {self.stage_idx - 1}")
-            recv_data = Recv.apply(self.stage_idx - 1, self.device, self.pp_group, flag)
-            recv_data = recv_data.to(self.device)
+            print(f"Rank {self.rank}: Completed last stage forward pass.")
+        else: # Intermediate stage
+            print(f"Rank {self.rank}: Receiving data from previous stage.")
+            recv_data = Recv.apply(self.stage_idx - 1, self.device, self.pp_group, input_data.dtype)
+            print(f"Rank {self.rank}: Data received from previous stage.")
+            print(f"Rank {self.rank}: Starting intermediate stage forward pass.")
             recv_data.requires_grad_(True)
-            print(f"Rank {self.rank}: Received activations, processing...")
-            # Forward through this stage
             output = self.model(recv_data)
-            print(f"Rank {self.rank}: Sending activations to stage {self.stage_idx + 1}")
-            # Send to next stage
+            print(f"Rank {self.rank}: Completed intermediate stage forward pass.")
+            print(f"Rank {self.rank}: Sending data from intermediate stage to next stage.")
             Send.apply(output, self.stage_idx + 1, self.pp_group)
-            print(f"Rank {self.rank}: Activations sent, waiting for backward pass...")
-            flag = output.shape
-            # The backward pass will be triggered by gradients from next stage
-            # coming through Send.backward, and will send gradients to previous
-            # stage through Recv.backward
-            
-        # For non-last stages, we need to wait for the backward pass to complete
-        # This happens automatically through autograd when the last stage calls backward()
-        
-        # Update parameters after backward pass completes
-        if not self.is_last_stage:
+            print(f"Rank {self.rank}: Data sent to next intermediate stage from previous intermediate.")
+
+        # --- BACKWARD PASS ---
+        # The backward pass is initiated ONLY on the last stage.
+        # This will trigger a chain reaction of gradient calculations and sends
+        # back through the pipeline, handled by autograd and our Send/Recv hooks.
+        if self.is_last_stage:
+            print(f"Rank {self.rank}: Starting backward pass.")
+            loss = self.criterion(output, target.to(self.device))
+            loss.backward()
+            print(f"Rank {self.rank}: Completed backward pass.")
+            # The optimizer step is now done AFTER the backward pass is complete.
             self.optimizer.step()
+            print(f"Rank {self.rank}: Optimizer step completed.")
+            acc = (output.argmax(dim=1) == target.to(self.device)).float().mean().item()
+            return loss.item(), acc * 100
+        
+        # FIX: For non-last stages, the autograd engine will automatically block
+        # until the gradients are received (inside Send.backward). Only after the
+        # entire backward pass for this stage is complete will control return.
+        # So, we simply call the optimizer step here, AFTER the forward pass
+        # and the implicit waiting for the backward pass.
+        else:
+            print(f"Rank {self.rank}: Waiting for backward pass to complete.")
+            # dist.barrier(self.pp_group)  # Ensure all ranks are synchronized
+            self.optimizer.step()
+            print(f"Rank {self.rank}: Optimizer step completed.")
             
         return None, None
 
