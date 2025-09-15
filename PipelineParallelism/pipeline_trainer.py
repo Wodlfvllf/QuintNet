@@ -50,8 +50,9 @@ class PipelineTrainer:
             # First stage: process input and send to next
             input_data = input_data.to(self.device)
             output = self.model(input_data)
-            flag = output.shape
+            # flag = output.shape
             if not self.is_last_stage:  # Multi-stage case
+                
                 # Send output to next stage
                 print(f"Rank {self.rank}: Sending activations to stage {self.stage_idx + 1}")
                 Send.apply(output, self.stage_idx + 1, self.pp_group)
