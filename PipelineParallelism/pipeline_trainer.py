@@ -84,24 +84,27 @@ class PipelineTrainer:
             loss = self.criterion(output, target.to(self.device))
             loss.backward()
             print(f"Rank {self.rank}: Completed backward pass.")
-            # The optimizer step is now done AFTER the backward pass is complete.
-            self.optimizer.step()
-            print(f"Rank {self.rank}: Optimizer step completed.")
-            acc = (output.argmax(dim=1) == target.to(self.device)).float().mean().item()
-            return loss.item(), acc * 100
-        
-        # FIX: For non-last stages, the autograd engine will automatically block
-        # until the gradients are received (inside Send.backward). Only after the
-        # entire backward pass for this stage is complete will control return.
-        # So, we simply call the optimizer step here, AFTER the forward pass
-        # and the implicit waiting for the backward pass.
-        else:
-            print(f"Rank {self.rank}: Waiting for backward pass to complete.")
-            # dist.barrier(self.pp_group)  # Ensure all ranks are synchronized
-            self.optimizer.step()
-            print(f"Rank {self.rank}: Optimizer step completed.")
             
-        return None, None
+        # --- BACKWARD PASS ---
+        
+        # --- SYNCHRONIZATION AND OPTIMIZER STEP ---
+        # There is no 'else' block here. Why?
+        # - The last rank is blocked inside `loss.backward()` until the whole chain finishes.
+        # - The other ranks are implicitly blocked by the autograd engine, waiting for
+        #   their `Send.backward` hook to be called and receive a gradient.
+        #
+        # Therefore, when the `loss.backward()` call on the last rank finally returns,
+        # we are guaranteed that the backward pass has finished EVERYWHERE.
+        dist.barrier(group=self.pp_group)
+        # Now, ALL ranks have their gradients and can safely update their weights.
+        self.optimizer.step()
+        print(f"Rank {self.rank}: Optimizer step completed.")
+        # Only the last stage has the loss and can calculate accuracy.
+        if self.is_last_stage:
+            acc = (output_tensor.argmax(dim=1) == target.to(self.device)).float().mean().item()
+            return loss.item(), acc * 100
+        else:
+            return None, None
 
     def evaluate(self, val_loader):
         """
