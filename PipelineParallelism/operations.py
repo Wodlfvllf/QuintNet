@@ -122,8 +122,8 @@ class Send(torch.autograd.Function):
         """
         Send a tensor to the destination rank.
         """
-        print(f"Send.forward: rank {dist.get_rank(group)} sending to rank {dest_rank}")
-        print(f"Send.forward: tensor shape {tensor.shape}, device {tensor.device}, dtype {tensor.dtype}")
+        # print(f"Send.forward: rank {dist.get_rank(group)} sending to rank {dest_rank}")
+        # print(f"Send.forward: tensor shape {tensor.shape}, device {tensor.device}, dtype {tensor.dtype}")
         
         # Ensure tensor is on the correct device and contiguous
         tensor_to_send = tensor.contiguous()
@@ -137,18 +137,18 @@ class Send(torch.autograd.Function):
         try:
             # 1. Send the number of dimensions
             num_dims = torch.tensor([tensor.dim()], dtype=torch.long, device=tensor.device)
-            print(f"Send.forward: sending num_dims {num_dims.item()}")
+            # print(f"Send.forward: sending num_dims {num_dims.item()}")
             dist.send(tensor=num_dims, dst=dest_rank, group=group)
 
             # 2. Send the shape
             shape_tensor = torch.tensor(tensor.shape, dtype=torch.long, device=tensor.device)
-            print(f"Send.forward: sending shape {shape_tensor.tolist()}")
+            # print(f"Send.forward: sending shape {shape_tensor.tolist()}")
             dist.send(tensor=shape_tensor, dst=dest_rank, group=group)
 
             # 3. Send the tensor data
-            print(f"Send.forward: sending tensor data...")
+            # print(f"Send.forward: sending tensor data...")
             dist.send(tensor=tensor_to_send, dst=dest_rank, group=group)
-            print(f"Send.forward: tensor data sent successfully")
+            # print(f"Send.forward: tensor data sent successfully")
             
         except Exception as e:
             print(f"Send.forward: ERROR - {e}")
@@ -162,7 +162,7 @@ class Send(torch.autograd.Function):
         """
         Receive gradients from the destination rank during the backward pass.
         """
-        print(f"Send.backward: rank {dist.get_rank(ctx.group)} waiting for grad from rank {ctx.dest_rank}")
+        # print(f"Send.backward: rank {dist.get_rank(ctx.group)} waiting for grad from rank {ctx.dest_rank}")
         
         # Pre-allocate a tensor to receive the gradient
         grad_tensor = torch.zeros(
@@ -172,9 +172,9 @@ class Send(torch.autograd.Function):
         )
         
         try:
-            print(f"Send.backward: receiving gradient tensor...")
+            # print(f"Send.backward: receiving gradient tensor...")
             dist.recv(tensor=grad_tensor, src=ctx.dest_rank, group=ctx.group)
-            print(f"Send.backward: gradient received successfully, norm: {grad_tensor.norm().item()}")
+            # print(f"Send.backward: gradient received successfully, norm: {grad_tensor.norm().item()}")
         except Exception as e:
             print(f"Send.backward: ERROR - {e}")
             raise
@@ -188,7 +188,7 @@ class Recv(torch.autograd.Function):
         """
         Receive a tensor from the source rank.
         """
-        print(f"Recv.forward: rank {dist.get_rank(group)} receiving from rank {src_rank}")
+        # print(f"Recv.forward: rank {dist.get_rank(group)} receiving from rank {src_rank}")
         
         # Store context for the backward pass
         ctx.src_rank = src_rank
@@ -198,23 +198,23 @@ class Recv(torch.autograd.Function):
         try:
             # 1. Receive the number of dimensions
             num_dims_tensor = torch.zeros(1, dtype=torch.long, device=device)
-            print(f"Recv.forward: waiting for num_dims...")
+            # print(f"Recv.forward: waiting for num_dims...")
             dist.recv(tensor=num_dims_tensor, src=src_rank, group=group)
             num_dims = num_dims_tensor.item()
-            print(f"Recv.forward: received num_dims: {num_dims}")
+            # print(f"Recv.forward: received num_dims: {num_dims}")
 
             # 2. Receive the shape
             shape_tensor = torch.zeros(num_dims, dtype=torch.long, device=device)
-            print(f"Recv.forward: waiting for shape...")
+            # print(f"Recv.forward: waiting for shape...")
             dist.recv(tensor=shape_tensor, src=src_rank, group=group)
             tensor_shape = shape_tensor.tolist()
-            print(f"Recv.forward: received shape: {tensor_shape}")
+            # print(f"Recv.forward: received shape: {tensor_shape}")
             
             # 3. Receive the tensor data
-            print(f"Recv.forward: waiting for tensor data...")
+            # print(f"Recv.forward: waiting for tensor data...")
             received_tensor = torch.zeros(tensor_shape, dtype=dtype, device=device)
             dist.recv(tensor=received_tensor, src=src_rank, group=group)
-            print(f"Recv.forward: received tensor successfully, norm: {received_tensor.norm().item()}")
+            # print(f"Recv.forward: received tensor successfully, norm: {received_tensor.norm().item()}")
             
         except Exception as e:
             print(f"Recv.forward: ERROR - {e}")
@@ -228,8 +228,8 @@ class Recv(torch.autograd.Function):
         """
         Send gradients back to the source rank during the backward pass.
         """
-        print(f"Recv.backward: rank {dist.get_rank(ctx.group)} sending grad to rank {ctx.src_rank}")
-        print(f"Recv.backward: grad_output norm: {grad_output.norm().item()}")
+        # print(f"Recv.backward: rank {dist.get_rank(ctx.group)} sending grad to rank {ctx.src_rank}")
+        # print(f"Recv.backward: grad_output norm: {grad_output.norm().item()}")
         
         # Send the gradient to the rank we received the tensor from
         dest_rank = ctx.src_rank
@@ -238,7 +238,7 @@ class Recv(torch.autograd.Function):
             # Ensure gradient is contiguous before sending
             grad_to_send = grad_output.contiguous()
             dist.send(tensor=grad_to_send, dst=dest_rank, group=ctx.group)
-            print(f"Recv.backward: gradient sent successfully")
+            # print(f"Recv.backward: gradient sent successfully")
         except Exception as e:
             print(f"Recv.backward: ERROR - {e}")
             raise
