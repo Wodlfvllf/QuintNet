@@ -162,6 +162,42 @@
 #         else:
 #             return None, None
 
+# Place these helpers at the top of pipeline_trainer.py
+
+import torch
+import torch.distributed as dist
+
+def send_tensor_with_header(tensor: torch.Tensor, dst: int, group=None):
+    """Sends a tensor preceded by a header containing its shape and dtype info."""
+    # 1. Send the number of dimensions
+    num_dims = torch.tensor([tensor.dim()], dtype=torch.long, device=tensor.device)
+    dist.send(tensor=num_dims, dst=dst, group=group)
+
+    # 2. Send the shape
+    shape_tensor = torch.tensor(tensor.shape, dtype=torch.long, device=tensor.device)
+    dist.send(tensor=shape_tensor, dst=dst, group=group)
+
+    # 3. Send the tensor data
+    dist.send(tensor=tensor.contiguous(), dst=dst, group=group)
+
+def recv_tensor_with_header(src: int, device: torch.device, group=None, dtype=torch.float32) -> torch.Tensor:
+    """Receives a tensor that is preceded by a shape and dtype header."""
+    # 1. Receive the number of dimensions
+    num_dims_tensor = torch.zeros(1, dtype=torch.long, device=device)
+    dist.recv(tensor=num_dims_tensor, src=src, group=group)
+    num_dims = num_dims_tensor.item()
+
+    # 2. Receive the shape
+    shape_tensor = torch.zeros(num_dims, dtype=torch.long, device=device)
+    dist.recv(tensor=shape_tensor, src=src, group=group)
+    tensor_shape = shape_tensor.tolist()
+    
+    # 3. Create a correctly shaped buffer and receive the tensor data
+    buffer = torch.zeros(tensor_shape, dtype=dtype, device=device)
+    dist.recv(tensor=buffer, src=src, group=group)
+    
+    return buffer
+
 import torch
 import torch.distributed as dist
 import torch.nn as nn
