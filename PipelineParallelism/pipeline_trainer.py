@@ -236,78 +236,50 @@ class PipelineTrainer:
         print(f"PipelineTrainer initialized - Rank: {self.rank}, Stage: {self.rank}")
 
     def train_step(self, input_data, target):
-        """
-        Performs a single training step with EXPLICIT manual communication.
-        This removes all implicit autograd synchronization and is guaranteed to work.
-        """
         self.model.train()
         self.optimizer.zero_grad()
 
         # --- 1. FORWARD PASS CHAIN ---
-        # Each stage computes its forward pass and sends the result to the next.
-        # We use .detach() to cut the autograd graph between processes.
-        
         if self.is_first_stage:
-            # First stage gets data directly from the dataloader.
             self.output_tensor_of_stage = self.model(input_data.to(self.device))
-            
-            # Send the result to the next stage.
-            dist.send(self.output_tensor_of_stage.detach(), dst=self.rank + 1, group=self.pp_group)
+            # MODIFIED: Use the helper to send the tensor and its metadata.
+            send_tensor_with_header(self.output_tensor_of_stage.detach(), self.rank + 1, self.pp_group)
         
         else: # For last and intermediate stages
-            # This stage must receive data from the previous stage.
-            # We need a buffer of the correct shape and type to receive into.
-            input_shape = self.model.get_input_shape(batch_size=input_data.size(0))
+            # MODIFIED: Use the helper to receive. It discovers the shape automatically.
+            buffer = recv_tensor_with_header(self.rank - 1, self.device, self.pp_group, dtype=input_data.dtype)
             
-            buffer = torch.zeros(input_shape, dtype=input_data.dtype, device=self.device)
-            
-            # Block until we receive the tensor from the previous stage.
-            dist.recv(buffer, src=self.rank - 1, group=self.pp_group)
-            
-            # This received tensor is a "leaf" in this stage's autograd graph.
             self.input_tensor_for_stage = buffer
             self.input_tensor_for_stage.requires_grad = True
             
-            # Now, run the forward pass for this stage.
             self.output_tensor_of_stage = self.model(self.input_tensor_for_stage)
             
-            # If we are an intermediate stage, send the result to the *next* stage.
             if not self.is_last_stage:
-                dist.send(self.output_tensor_of_stage.detach(), dst=self.rank + 1, group=self.pp_group)
+                send_tensor_with_header(self.output_tensor_of_stage.detach(), self.rank + 1, self.pp_group)
 
         # --- 2. BACKWARD PASS CHAIN (in reverse) ---
-        # The last stage calculates loss and starts the backward chain reaction.
-        
         if self.is_last_stage:
             loss = self.criterion(self.output_tensor_of_stage, target.to(device=self.device, dtype=torch.long))
-            # This computes gradients for this stage's parameters and for its input tensor.
             loss.backward()
             
-            # Manually send the gradient of the input tensor back to the previous stage.
+            # MODIFIED: Use the helper to send the gradient and its metadata.
             grad_to_send = self.input_tensor_for_stage.grad
-            dist.send(grad_to_send, dst=self.rank - 1, group=self.pp_group)
+            send_tensor_with_header(grad_to_send, self.rank - 1, self.pp_group)
             
         else: # For first and intermediate stages
-            # Create a buffer to receive the gradient for this stage's output.
-            grad_buffer = torch.zeros_like(self.output_tensor_of_stage)
+            # MODIFIED: Use the helper to receive the gradient.
+            # We know the gradient will have the same shape and dtype as our stage's output.
+            grad_buffer = recv_tensor_with_header(self.rank + 1, self.device, self.pp_group, dtype=self.output_tensor_of_stage.dtype)
             
-            # Block until we receive the gradient from the next stage.
-            dist.recv(grad_buffer, src=self.rank + 1, group=self.pp_group)
-            
-            # Continue the backward pass on this stage using the received gradient.
             self.output_tensor_of_stage.backward(gradient=grad_buffer)
             
-            # If we are an intermediate stage, we must also pass the gradient back.
             if not self.is_first_stage:
                 grad_to_send = self.input_tensor_for_stage.grad
-                dist.send(grad_to_send, dst=self.rank - 1, group=self.pp_group)
+                send_tensor_with_header(grad_to_send, self.rank - 1, self.pp_group)
         
         # --- 3. OPTIMIZER STEP ---
-        # The manual send/recv in the backward pass guarantees that all ranks are
-        # synchronized. All gradients are now computed. It's safe for all ranks to step.
         self.optimizer.step()
         
-        # Return metrics only from the last stage.
         if self.is_last_stage:
             acc = (self.output_tensor_of_stage.argmax(dim=1) == target.to(self.device)).float().mean().item()
             return loss.item(), acc * 100
@@ -315,8 +287,6 @@ class PipelineTrainer:
             return None, None
             
     def evaluate(self, val_loader):
-        # The same manual, explicit logic applies to evaluation.
-        # This implementation is robust and correct.
         self.model.eval()
         total_loss = 0.0
         total_correct = 0
@@ -330,14 +300,14 @@ class PipelineTrainer:
                 if self.is_first_stage:
                     output = self.model(images.to(self.device))
                     if not self.is_last_stage:
-                        dist.send(output, dst=self.rank + 1, group=self.pp_group)
+                        # MODIFIED: Use the helper for evaluation as well.
+                        send_tensor_with_header(output, self.rank + 1, self.pp_group)
                 else:
-                    input_shape = self.model.get_input_shape(batch_size=images.size(0))
-                    buffer = torch.zeros(input_shape, dtype=images.dtype, device=self.device)
-                    dist.recv(buffer, src=self.rank - 1, group=self.pp_group)
+                    # MODIFIED: The helper removes the need for get_input_shape.
+                    buffer = recv_tensor_with_header(self.rank - 1, self.device, self.pp_group, dtype=images.dtype)
                     output = self.model(buffer)
                     if not self.is_last_stage:
-                        dist.send(output, dst=self.rank + 1, group=self.pp_group)
+                        send_tensor_with_header(output, self.rank + 1, self.pp_group)
 
                 if self.is_last_stage:
                     targets = targets.to(self.device, dtype=torch.long)
@@ -346,10 +316,7 @@ class PipelineTrainer:
                     total_correct += (output.argmax(dim=1) == targets).sum().item()
                     total_samples += output.size(0)
 
-        if self.pp_group is not None:
-            dist.barrier(group=self.pp_group)
-        else:
-            dist.barrier()
+        dist.barrier(group=self.pp_group)
         
         if self.is_last_stage:
             avg_loss = total_loss / total_samples if total_samples > 0 else 0.0
