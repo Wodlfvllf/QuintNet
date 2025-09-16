@@ -95,3 +95,75 @@ class PipelineTrainer:
             return loss.item(), acc * 100
         else:
             return None, None
+        
+    # In your PipelineTrainer class
+
+    def evaluate(self, val_loader):
+        """
+        Evaluates the model on the validation set using a manual forward pass.
+        No gradients are computed, and communication is explicit via dist.send/recv.
+        """
+        self.model.eval()
+        total_loss = 0.0
+        total_correct = 0
+        total_samples = 0
+
+        # Gradients are not needed for evaluation.
+        with torch.no_grad():
+            for batch in val_loader:
+                images = batch['image']
+                targets = batch['label']
+
+                # --- MANUAL FORWARD PASS CHAIN ---
+                if self.is_first_stage:
+                    # First stage gets data from the dataloader and sends its output.
+                    output = self.model(images.to(self.device))
+                    if not self.is_last_stage:
+                        dist.send(output, dst=self.rank + 1, group=self.pp_group)
+                
+                else: # For last and intermediate stages
+                    # These stages must receive data from the previous stage.
+                    # A buffer of the correct shape is required for the receive operation.
+                    
+                    # IMPORTANT: Your PipelineParallelWrapper must provide this shape.
+                    # The batch size can change on the last batch, so we pass it in.
+                    input_shape = self.model.get_input_shape(is_eval=True, batch_size=images.size(0))
+                    
+                    buffer = torch.zeros(input_shape, dtype=images.dtype, device=self.device)
+                    
+                    # Block until we receive the tensor from the previous stage.
+                    dist.recv(buffer, src=self.rank - 1, group=self.pp_group)
+                    
+                    output = self.model(buffer)
+                    
+                    # If we are an intermediate stage, send the result to the *next* stage.
+                    if not self.is_last_stage:
+                        dist.send(output, dst=self.rank + 1, group=self.pp_group)
+
+                # --- METRIC CALCULATION (only on the last stage) ---
+                if self.is_last_stage:
+                    # The last stage has the final output (logits) and can compute metrics.
+                    targets = targets.to(self.device, dtype=torch.long)
+                    loss = self.criterion(output, targets)
+                    
+                    # Accumulate metrics for the entire epoch
+                    total_loss += loss.item() * output.size(0)
+                    total_correct += (output.argmax(dim=1) == targets).sum().item()
+                    total_samples += output.size(0)
+
+        # --- SYNCHRONIZE AND RETURN RESULTS ---
+        
+        # A barrier ensures all ranks finish the evaluation loop before the last rank
+        # reports the final result. This prevents premature exit.
+        if self.pp_group is not None:
+            dist.barrier(group=self.pp_group)
+        else:
+            dist.barrier()
+
+        # Only the last stage has the results.
+        if self.is_last_stage:
+            avg_loss = total_loss / total_samples if total_samples > 0 else 0.0
+            accuracy = (total_correct / total_samples * 100) if total_samples > 0 else 0.0
+            return avg_loss, accuracy
+        else:
+            return None, None
