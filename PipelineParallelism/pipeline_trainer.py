@@ -201,6 +201,7 @@ def recv_tensor_with_header(src: int, device: torch.device, group=None, dtype=to
 import torch
 import torch.distributed as dist
 import torch.nn as nn
+from collections import deque
 
 class PipelineTrainer:
     def __init__(self, model, pp_group, criterion, device):
