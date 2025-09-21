@@ -285,74 +285,6 @@ class PipelineTrainer:
             return loss.item(), acc * 100
         else:
             return None, None
-        
-    # def train_all_forward_and_backward_optimised(self, data_loader, pgm, requires_grad_sync=True):
-    #     self.model.train()
-    #     self.optimizer.zero_grad()
-    #     input_tensors = []
-    #     output_tensors = []
-    #     logging_loss = 0.0
-    #     device = self.device
-    #     acc = 0.0
-        
-    #     # Convert data_loader to list to allow multiple iterations
-    #     batches = list(data_loader)
-        
-    #     # All forward passes
-    #     for i, batch in enumerate(tqdm(batches)):
-    #         if self.is_first_stage:
-    #             output_tensor = self.model(batch['image'].to(device))
-    #             send_tensor_with_header(output_tensor.detach(), self.rank + 1, self.pp_group)
-    #             input_tensor = None
-    #         else:
-    #             input_tensor = recv_tensor_with_header(self.rank - 1, self.device, self.pp_group, dtype=torch.float32)
-    #             output_tensor = self.model(input_tensor)
-    #         input_tensors.append(input_tensor)
-    #         output_tensors.append(output_tensor)
-
-    #     # All backward passes (in reverse order)
-    #     for i in range(len(batches) - 1, -1, -1):
-    #         batch = batches[i]
-            
-    #         if self.is_last_stage:
-    #             # Get target labels based on batch structure
-    #             if "labels" in batch:
-    #                 target = batch["labels"].to(device, dtype=torch.long)
-    #             else:
-    #                 target = batch["label"].to(device, dtype=torch.long)
-                
-    #             output_tensor = output_tensors.pop()
-    #             loss = self.criterion(output_tensor, target)
-    #             logging_loss += loss.item()
-    #             loss.backward()
-    #             acc = (self.output_tensor_of_stage.argmax(dim=1) == target.to(self.device)).float().mean().item()
-                
-    #             if not self.is_first_stage:
-    #                 grad_to_send = input_tensors.pop().grad
-    #                 send_tensor_with_header(grad_to_send, self.rank - 1, self.pp_group)
-    #             else:
-    #                 input_tensors.pop()  # Remove from list even if not sending
-    #         else:
-    #             # Receive gradient from next stage
-    #             grad_buffer = recv_tensor_with_header(self.rank + 1, device, self.pp_group, dtype=dtype)
-    #             output_tensor = output_tensors.pop()
-    #             output_tensor.backward(gradient=grad_buffer)
-                
-    #             if not self.is_first_stage:
-    #                 grad_to_send = input_tensors.pop().grad
-    #                 send_tensor_with_header(grad_to_send, self.rank - 1, self.pp_group)
-    #             else:
-    #                 input_tensors.pop()  # Remove from list even if not sending
-
-    #     # Synchronize gradients across all stages
-    #     if requires_grad_sync:
-    #         dist.barrier(group=self.pp_group)
-        
-    #     # Optimizer step
-    #     self.optimizer.step()
-        
-    #     # Correct syntax
-    #     return logging_loss / len(batches), (acc if self.is_last_stage else 0.0), 0.0
     
     def train_all_forward_and_backward_optimised(self, data_loader, pgm, requires_grad_sync=True):
         self.model.train()
@@ -437,6 +369,98 @@ class PipelineTrainer:
 
         # Return the average loss and accuracy
         return logging_loss / len(batches), acc if self.is_last_stage else 0.0
+    
+    from collections import deque
+
+    def train_one_forward_one_backward(self, data_loader, pgm):
+        self.model.train()
+        self.optimizer.zero_grad()
+        
+        # The number of micro-batches to process before starting backward passes
+        # This is also the number of pipeline stages.
+        pipeline_depth = self.world_size 
+        
+        batches = list(data_loader)
+        num_micro_batches = len(batches)
+        
+        # Queues to hold data for forward and backward passes for each stage
+        fwd_inputs_q = deque()
+        fwd_outputs_q = deque()
+
+        # --- NEW: Accumulators for metrics ---
+        total_loss = 0.0
+        total_correct = 0
+
+        # Main loop processes micro-batches
+        for i in range(num_micro_batches + pipeline_depth - 1):
+            # --- FORWARD PASS ---
+            is_fwd_step = i < num_micro_batches
+            if is_fwd_step:
+                if self.is_first_stage:
+                    # First stage gets data from loader
+                    input_tensor = batches[i]['image'].to(self.device)
+                    output_tensor = self.model(input_tensor)
+                    send_tensor_with_header(output_tensor.detach(), self.rank + 1, self.pp_group)
+                else:
+                    input_tensor = recv_tensor_with_header(self.rank - 1, self.device, self.pp_group)
+                    input_tensor.requires_grad = True
+                    output_tensor = self.model(input_tensor)
+                    if not self.is_last_stage:
+                        send_tensor_with_header(output_tensor.detach(), self.rank + 1, self.pp_group)
+
+                # Save tensors needed for the corresponding backward pass
+                fwd_inputs_q.append(input_tensor)
+                fwd_outputs_q.append(output_tensor)
+            
+            # --- BACKWARD PASS ---
+            # Start backward passes after the pipeline is full
+            is_bwd_step = i >= pipeline_depth - 1
+            if is_bwd_step:
+                # Get the tensors from the corresponding forward pass
+                input_tensor_for_grad = fwd_inputs_q.popleft()
+                output_tensor_for_grad = fwd_outputs_q.popleft()
+
+                if self.is_last_stage:
+                    target = batches[i - pipeline_depth + 1]['label'].to(self.device, dtype=torch.long)
+                    loss = self.criterion(output_tensor_for_grad, target)
+                    
+                    # --- NEW: Accumulate loss and accuracy ---
+                    total_loss += loss.item()
+                    total_correct += (output_tensor_for_grad.argmax(dim=1) == target).sum().item()
+                    
+                    # We scale the loss by the number of micro-batches to average gradients
+                    # This is important if your loss function is 'sum' instead of 'mean'
+                    scaled_loss = loss / num_micro_batches
+                    scaled_loss.backward()
+
+                    if input_tensor_for_grad is not None:
+                        # Scale the gradient before sending
+                        grad_to_send = input_tensor_for_grad.grad / num_micro_batches
+                        send_tensor_with_header(grad_to_send, self.rank - 1, self.pp_group)
+                else:
+                    grad_buffer = recv_tensor_with_header(self.rank + 1, self.device, self.pp_group)
+                    output_tensor_for_grad.backward(gradient=grad_buffer)
+                    
+                    if not self.is_first_stage and input_tensor_for_grad is not None:
+                        # Note: grad is already scaled from the previous stage
+                        send_tensor_with_header(input_tensor_for_grad.grad, self.rank - 1, self.pp_group)
+
+        # After the loop, step the optimizer
+        self.optimizer.step()
+
+        # --- NEW: Calculate and return final metrics ---
+        if self.is_last_stage:
+            # Calculate average loss over all micro-batches
+            avg_loss = total_loss / num_micro_batches
+            
+            # Calculate accuracy over the entire dataset
+            total_samples = sum(len(b['label']) for b in batches)
+            accuracy = (total_correct / total_samples) * 100
+            
+            return avg_loss, accuracy
+        else:
+            # Other stages don't have the final metrics
+            return 0.0, 0.0
             
     def evaluate(self, val_loader):
         self.model.eval()
