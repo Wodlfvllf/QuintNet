@@ -235,7 +235,7 @@ class PipelineTrainer:
         
         print(f"PipelineTrainer initialized - Rank: {self.rank}, Stage: {self.rank}")
 
-    def train_step(self, input_data, target):
+    def train_step_naive(self, input_data, target):
         self.model.train()
         self.optimizer.zero_grad()
 
@@ -285,6 +285,48 @@ class PipelineTrainer:
             return loss.item(), acc * 100
         else:
             return None, None
+        
+    def train_all_forward_and_backward_optimised(self, data_loader, pgm: ProcessGroupManager, requires_grad_sync=True):
+        self.model.train()
+        self.optimizer.zero_grad()
+        input_tensors = []
+        output_tensors = []
+        logging_loss = 0.0
+        device = self.device
+        model = self.model
+        dtype = next(model.parameters()).dtype
+        for _ in range(len(data_loader)): # All forward passes
+            if self.is_first_stage:
+                batch = next(data_loader)
+                output_tensor = model.forward(input_ids=batch["input_ids"].to(device), position_ids=batch["position_ids"].to(device), hidden_states=None)
+                send_tensor_with_header(output_tensor.detach(), self.rank + 1, self.pp_group)
+                input_tensor = None
+            else:
+                tensor_shapes = get_input_shape(self.rank - 1, device, self.pp_group, dtype)
+                input_tensor = send_tensor_with_header(self.output_tensor_of_stage.detach(), self.rank + 1, self.pp_group)
+                output_tensor = model.forward(input_ids=None, position_ids=None, hidden_states=input_tensor)
+            input_tensors.append(input_tensor)
+            output_tensors.append(output_tensor)
+            
+        for _ in range(len(data_loader)): # All backward passes
+            if self.is_last_stage:
+                batch = next(data_loader)
+                target = batch["labels"].to(device, dtype=torch.long)
+                loss = self.criterion(output_tensors.pop(), target)
+                logging_loss += loss.item()
+                loss.backward()
+                if not self.is_first_stage:
+                    grad_to_send = input_tensors.pop().grad
+                    send_tensor_with_header(grad_to_send, self.rank - 1, self.pp_group)
+            else:
+                grad_buffer = recv_tensor_with_header(self.rank + 1, device, self.pp_group, dtype=dtype)
+                output_tensor = output_tensors.pop()
+                output_tensor.backward(gradient=grad_buffer)
+                if not self.is_first_stage:
+                    grad_to_send = input_tensors.pop().grad
+                    send_tensor_with_header(grad_to_send, self.rank - 1, self.pp_group)
+
+        return logging_loss
             
     def evaluate(self, val_loader):
         self.model.eval()
@@ -324,3 +366,5 @@ class PipelineTrainer:
             return avg_loss, accuracy
         else:
             return None, None
+        
+        
