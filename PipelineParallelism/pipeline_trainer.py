@@ -295,38 +295,63 @@ class PipelineTrainer:
         device = self.device
         model = self.model
         dtype = next(model.parameters()).dtype
-        for _ in range(len(data_loader)): # All forward passes
+        
+        # Convert data_loader to list to allow multiple iterations
+        batches = list(data_loader)
+        
+        # All forward passes
+        for i, batch in enumerate(batches):
             if self.is_first_stage:
-                batch = next(data_loader)
-                output_tensor = model.forward(input_ids=batch["input_ids"].to(device), position_ids=batch["position_ids"].to(device), hidden_states=None)
+                output_tensor = model.forward(batch['image'].to(device))
                 send_tensor_with_header(output_tensor.detach(), self.rank + 1, self.pp_group)
                 input_tensor = None
             else:
-                tensor_shapes = get_input_shape(self.rank - 1, device, self.pp_group, dtype)
-                input_tensor = send_tensor_with_header(self.output_tensor_of_stage.detach(), self.rank + 1, self.pp_group)
-                output_tensor = model.forward(input_ids=None, position_ids=None, hidden_states=input_tensor)
+                input_tensor = recv_tensor_with_header(self.output_tensor_of_stage.detach(), self.rank + 1, self.pp_group)
+                output_tensor = model.forward(input_tensor)
             input_tensors.append(input_tensor)
             output_tensors.append(output_tensor)
+
+        # All backward passes (in reverse order)
+        for i in range(len(batches) - 1, -1, -1):
+            batch = batches[i]
             
-        for _ in range(len(data_loader)): # All backward passes
             if self.is_last_stage:
-                batch = next(data_loader)
-                target = batch["labels"].to(device, dtype=torch.long)
-                loss = self.criterion(output_tensors.pop(), target)
+                # Get target labels based on batch structure
+                if "labels" in batch:
+                    target = batch["labels"].to(device, dtype=torch.long)
+                else:
+                    target = batch["label"].to(device, dtype=torch.long)
+                
+                output_tensor = output_tensors.pop()
+                loss = self.criterion(output_tensor, target)
                 logging_loss += loss.item()
                 loss.backward()
+                
                 if not self.is_first_stage:
                     grad_to_send = input_tensors.pop().grad
                     send_tensor_with_header(grad_to_send, self.rank - 1, self.pp_group)
+                else:
+                    input_tensors.pop()  # Remove from list even if not sending
             else:
+                # Receive gradient from next stage
                 grad_buffer = recv_tensor_with_header(self.rank + 1, device, self.pp_group, dtype=dtype)
                 output_tensor = output_tensors.pop()
                 output_tensor.backward(gradient=grad_buffer)
+                
                 if not self.is_first_stage:
                     grad_to_send = input_tensors.pop().grad
                     send_tensor_with_header(grad_to_send, self.rank - 1, self.pp_group)
+                else:
+                    input_tensors.pop()  # Remove from list even if not sending
 
-        return logging_loss
+        # Synchronize gradients across all stages
+        if requires_grad_sync:
+            dist.barrier(group=self.pp_group)
+        
+        # Optimizer step
+        self.optimizer.step()
+        
+        return logging_loss / len(batches) if self.is_last_stage else 0.0
             
     def evaluate(self, val_loader):
         self.model.eval()
