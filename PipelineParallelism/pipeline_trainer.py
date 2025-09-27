@@ -172,7 +172,220 @@ import torch.distributed as dist
 import numpy as np
 from collections import defaultdict
 import time
+import torch
+import torch.distributed as dist
+import time
+from contextlib import contextmanager
 
+class CommunicationDebugger:
+    """Debug communication patterns and detect deadlocks"""
+    
+    def __init__(self, rank, world_size, pp_group):
+        self.rank = rank
+        self.world_size = world_size
+        self.pp_group = pp_group
+        self.send_count = 0
+        self.recv_count = 0
+        self.comm_log = []
+    
+    def log_communication(self, operation, peer_rank, tensor_info="", step=""):
+        """Log all communication operations"""
+        timestamp = time.time()
+        log_entry = {
+            'timestamp': timestamp,
+            'rank': self.rank,
+            'operation': operation,
+            'peer_rank': peer_rank,
+            'tensor_info': tensor_info,
+            'step': step
+        }
+        self.comm_log.append(log_entry)
+        
+        print(f"[COMM LOG Rank {self.rank}] {step} {operation} {'to' if 'send' in operation else 'from'} "
+              f"rank {peer_rank} - {tensor_info}")
+    
+    def check_communication_balance(self):
+        """Check if sends and receives are balanced"""
+        sends = sum(1 for entry in self.comm_log if 'send' in entry['operation'])
+        recvs = sum(1 for entry in self.comm_log if 'recv' in entry['operation'])
+        
+        print(f"[COMM BALANCE Rank {self.rank}] Sends: {sends}, Receives: {recvs}")
+        
+        if abs(sends - recvs) > self.world_size:  # Allow some imbalance due to pipeline
+            print(f"[COMM WARNING Rank {self.rank}] Significant imbalance detected!")
+        
+        return sends, recvs
+
+@contextmanager
+def timeout_context(seconds=30):
+    """Context manager for detecting hanging operations"""
+    start_time = time.time()
+    try:
+        yield
+    finally:
+        elapsed = time.time() - start_time
+        if elapsed > seconds:
+            print(f"[TIMEOUT WARNING] Operation took {elapsed:.2f} seconds!")
+
+def safe_send_tensor_with_header(tensor: torch.Tensor, dst: int, group=None, 
+                                 rank=None, timeout=60, step=""):
+    """Safe version of send_tensor_with_header with debugging and timeout"""
+    
+    print(f"[SAFE SEND Rank {rank}] {step} Attempting to send to rank {dst}")
+    print(f"  Tensor shape: {tensor.shape}, dtype: {tensor.dtype}")
+    
+    try:
+        start_time = time.time()
+        
+        # Add synchronization point before critical communication
+        if group:
+            print(f"[SAFE SEND Rank {rank}] Synchronizing before send...")
+            dist.barrier(group=group)
+        
+        # 1. Send the number of dimensions
+        num_dims = torch.tensor([tensor.dim()], dtype=torch.long, device=tensor.device)
+        print(f"[SAFE SEND Rank {rank}] Sending num_dims: {num_dims.item()}")
+        dist.send(tensor=num_dims, dst=dst, group=group)
+        
+        elapsed = time.time() - start_time
+        if elapsed > 5:
+            print(f"[TIMEOUT WARNING Rank {rank}] num_dims send took {elapsed:.2f}s")
+
+        # 2. Send the shape
+        shape_tensor = torch.tensor(tensor.shape, dtype=torch.long, device=tensor.device)
+        print(f"[SAFE SEND Rank {rank}] Sending shape: {shape_tensor.tolist()}")
+        dist.send(tensor=shape_tensor, dst=dst, group=group)
+        
+        elapsed = time.time() - start_time
+        if elapsed > 10:
+            print(f"[TIMEOUT WARNING Rank {rank}] shape send took {elapsed:.2f}s")
+
+        # 3. Send the tensor data
+        contiguous_tensor = tensor.contiguous()
+        print(f"[SAFE SEND Rank {rank}] Sending tensor data...")
+        dist.send(tensor=contiguous_tensor, dst=dst, group=group)
+        
+        total_elapsed = time.time() - start_time
+        print(f"[SAFE SEND Rank {rank}] ✅ Send completed in {total_elapsed:.2f}s")
+        
+        if total_elapsed > timeout:
+            print(f"[ERROR Rank {rank}] Send operation timed out after {total_elapsed:.2f}s!")
+            
+    except Exception as e:
+        print(f"[ERROR Rank {rank}] Send failed: {e}")
+        raise
+
+def safe_recv_tensor_with_header(src: int, device: torch.device, group=None,
+                                dtype=torch.float32, rank=None, timeout=60, step=""):
+    """Safe version of recv_tensor_with_header with debugging and timeout"""
+    
+    print(f"[SAFE RECV Rank {rank}] {step} Attempting to receive from rank {src}")
+    
+    try:
+        start_time = time.time()
+        
+        # Add synchronization point before critical communication
+        if group:
+            print(f"[SAFE RECV Rank {rank}] Synchronizing before recv...")
+            dist.barrier(group=group)
+        
+        # 1. Receive the number of dimensions
+        num_dims_tensor = torch.zeros(1, dtype=torch.long, device=device)
+        print(f"[SAFE RECV Rank {rank}] Waiting for num_dims from rank {src}...")
+        dist.recv(tensor=num_dims_tensor, src=src, group=group)
+        num_dims = num_dims_tensor.item()
+        print(f"[SAFE RECV Rank {rank}] Received num_dims: {num_dims}")
+        
+        elapsed = time.time() - start_time
+        if elapsed > 5:
+            print(f"[TIMEOUT WARNING Rank {rank}] num_dims recv took {elapsed:.2f}s")
+
+        # 2. Receive the shape
+        shape_tensor = torch.zeros(num_dims, dtype=torch.long, device=device)
+        print(f"[SAFE RECV Rank {rank}] Waiting for shape...")
+        dist.recv(tensor=shape_tensor, src=src, group=group)
+        tensor_shape = shape_tensor.tolist()
+        print(f"[SAFE RECV Rank {rank}] Received shape: {tensor_shape}")
+        
+        elapsed = time.time() - start_time
+        if elapsed > 10:
+            print(f"[TIMEOUT WARNING Rank {rank}] shape recv took {elapsed:.2f}s")
+        
+        # 3. Create a correctly shaped buffer and receive the tensor data
+        buffer = torch.zeros(tensor_shape, dtype=dtype, device=device)
+        print(f"[SAFE RECV Rank {rank}] Waiting for tensor data...")
+        dist.recv(tensor=buffer, src=src, group=group)
+        
+        total_elapsed = time.time() - start_time
+        print(f"[SAFE RECV Rank {rank}] ✅ Receive completed in {total_elapsed:.2f}s")
+        
+        if total_elapsed > timeout:
+            print(f"[ERROR Rank {rank}] Receive operation timed out after {total_elapsed:.2f}s!")
+        
+        return buffer
+        
+    except Exception as e:
+        print(f"[ERROR Rank {rank}] Receive failed: {e}")
+        raise
+
+def debug_communication_pattern(rank, world_size, num_micro_batches, pipeline_depth):
+    """Debug the expected communication pattern"""
+    
+    print(f"\n[COMM PATTERN DEBUG Rank {rank}] Expected communication pattern:")
+    print(f"  Pipeline depth: {pipeline_depth}")
+    print(f"  Micro-batches: {num_micro_batches}")
+    print(f"  Total steps: {num_micro_batches + pipeline_depth - 1}")
+    
+    expected_sends = []
+    expected_recvs = []
+    
+    for i in range(num_micro_batches + pipeline_depth - 1):
+        step_info = f"Step {i}:"
+        
+        # Forward pass
+        if i < num_micro_batches:
+            if rank == 0:  # First stage
+                expected_sends.append(f"FWD step {i} -> rank 1")
+                step_info += f" FWD send to {rank + 1}"
+            elif rank == world_size - 1:  # Last stage
+                expected_recvs.append(f"FWD step {i} <- rank {rank - 1}")
+                step_info += f" FWD recv from {rank - 1}"
+            else:  # Middle stages
+                expected_recvs.append(f"FWD step {i} <- rank {rank - 1}")
+                expected_sends.append(f"FWD step {i} -> rank {rank + 1}")
+                step_info += f" FWD recv from {rank - 1}, send to {rank + 1}"
+        
+        # Backward pass
+        if i >= pipeline_depth - 1:
+            bwd_step = i - pipeline_depth + 1
+            if rank == world_size - 1:  # Last stage
+                if rank > 0:
+                    expected_sends.append(f"BWD step {bwd_step} -> rank {rank - 1}")
+                    step_info += f" BWD send to {rank - 1}"
+            elif rank == 0:  # First stage
+                expected_recvs.append(f"BWD step {bwd_step} <- rank {rank + 1}")
+                step_info += f" BWD recv from {rank + 1}"
+            else:  # Middle stages
+                expected_recvs.append(f"BWD step {bwd_step} <- rank {rank + 1}")
+                expected_sends.append(f"BWD step {bwd_step} -> rank {rank - 1}")
+                step_info += f" BWD recv from {rank + 1}, send to {rank - 1}"
+        
+        print(f"    {step_info}")
+    
+    print(f"\n[COMM PATTERN DEBUG Rank {rank}] Summary:")
+    print(f"  Expected sends: {len(expected_sends)}")
+    for send in expected_sends[:5]:  # Show first 5
+        print(f"    {send}")
+    if len(expected_sends) > 5:
+        print(f"    ... and {len(expected_sends) - 5} more")
+    
+    print(f"  Expected receives: {len(expected_recvs)}")
+    for recv in expected_recvs[:5]:  # Show first 5
+        print(f"    {recv}")
+    if len(expected_recvs) > 5:
+        print(f"    ... and {len(expected_recvs) - 5} more")
+        
+        
 class PipelineDebugger:
     """Comprehensive debugging utility for pipeline parallelism"""
     
@@ -188,7 +401,7 @@ class PipelineDebugger:
         self.backward_count = 0
         self.tensor_stats = defaultdict(list)
         
-        def log_tensor_stats(self, tensor, name, step=""):
+    def log_tensor_stats(self, tensor, name, step=""):
         """Log comprehensive tensor statistics"""
         if tensor is None:
             print(f"[DEBUG Rank {self.rank}] {step} {name}: NONE")
@@ -513,6 +726,9 @@ class PipelineTrainer:
         pipeline_depth = self.world_size 
         batches = list(data_loader)
         num_micro_batches = len(batches)
+        
+        # Debug communication pattern
+        debug_communication_pattern(self.rank, self.world_size, num_micro_batches, pipeline_depth)
         
         print(f"[TRAIN DEBUG Rank {self.rank}] Processing {num_micro_batches} micro-batches, "
               f"pipeline_depth={pipeline_depth}")
