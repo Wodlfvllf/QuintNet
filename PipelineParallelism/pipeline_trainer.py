@@ -214,7 +214,7 @@ class PipelineTrainer:
     
     from collections import deque
 
-    def train_one_forward_one_backward(self, data_loader, pgm):
+    def train_one_forward_one_backward(self, data_loader, pgm, epoch):
         self.model.train()
         self.optimizer.zero_grad()
         
@@ -232,9 +232,11 @@ class PipelineTrainer:
         # --- NEW: Accumulators for metrics ---
         total_loss = 0.0
         total_correct = 0
-
+        
+        self.print_layer_debug_norms(self.model, self.rank, f"Epoch {epoch+1} Start")
         # Main loop processes micro-batches
         for i in tqdm(range(num_micro_batches + pipeline_depth - 1)):
+            
             # --- FORWARD PASS ---
             is_fwd_step = i < num_micro_batches
             if is_fwd_step:
@@ -272,12 +274,12 @@ class PipelineTrainer:
                     
                     # We scale the loss by the number of micro-batches to average gradients
                     # This is important if your loss function is 'sum' instead of 'mean'
-                    scaled_loss = loss / num_micro_batches
+                    scaled_loss = loss
                     scaled_loss.backward()
 
                     if input_tensor_for_grad is not None:
                         # Scale the gradient before sending
-                        grad_to_send = input_tensor_for_grad.grad / num_micro_batches
+                        grad_to_send = input_tensor_for_grad.grad
                         send_tensor_with_header(grad_to_send, self.rank - 1, self.pp_group)
                 else:
                     grad_buffer = recv_tensor_with_header(self.rank + 1, self.device, self.pp_group)
@@ -289,7 +291,7 @@ class PipelineTrainer:
 
         # After the loop, step the optimizer
         self.optimizer.step()
-
+        self.print_layer_debug_norms(self.model, self.rank, f"Epoch {epoch+1} Start")
         # --- NEW: Calculate and return final metrics ---
         if self.is_last_stage:
             # Calculate average loss over all micro-batches
@@ -303,6 +305,35 @@ class PipelineTrainer:
         else:
             # Other stages don't have the final metrics
             return 0.0, 0.0
+            
+    def print_layer_debug_norms(self, model, rank, point_in_time: str):
+        """
+        Prints the L2 norm of each layer's parameters and their gradients.
+
+        Args:
+            model: The PipelineParallelWrapper instance for the current rank.
+            rank: The rank of the current process.
+            point_in_time: A string describing when this is being called (e.g., "After backward").
+        """
+        print(f"--- [Rank {rank}] Layer Norms at '{point_in_time}' ---")
+        
+        # Access the local module within the wrapper
+        params = list(model.local_module.named_parameters())
+        
+        if not params:
+            print(f"  No parameters on this rank.")
+            return
+
+        for name, p in params:
+            if p.requires_grad:
+                param_norm = p.detach().data.norm(2).item()
+                
+                grad_norm_str = "N/A (None)"
+                if p.grad is not None:
+                    grad_norm = p.grad.detach().data.norm(2).item()
+                    grad_norm_str = f"{grad_norm:.6f}"
+                
+                print(f"  Layer: {name:<40} | Param Norm: {param_norm:.6f} | Grad Norm: {grad_norm_str}")
             
     def evaluate(self, val_loader):
         self.model.eval()
