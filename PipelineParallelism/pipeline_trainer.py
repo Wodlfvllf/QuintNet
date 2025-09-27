@@ -128,7 +128,91 @@ class PipelineTrainer:
         else:
             return None, None
     
-    def train_all_forward_and_backward_optimised(self, data_loader, pgm, requires_grad_sync=True):
+    # def train_all_forward_and_backward_optimised(self, data_loader, pgm, requires_grad_sync=True):
+    #     self.model.train()
+    #     self.optimizer.zero_grad()
+    #     input_tensors = []
+    #     output_tensors = []
+    #     logging_loss = 0.0
+    #     device = self.device
+    #     acc = 0.0
+        
+    #     # Convert data_loader to list to allow multiple iterations
+    #     batches = list(data_loader)
+        
+    #     # All forward passes
+    #     for i, batch in enumerate(tqdm(batches)):
+    #         if self.is_first_stage:
+    #             output_tensor = self.model(batch['image'].to(device))
+    #             send_tensor_with_header(output_tensor.detach(), self.rank + 1, self.pp_group)
+    #             input_tensor = None # First stage has no input tensor from another stage
+                
+    #             # Store the model's direct input for the backward pass
+    #             # This requires saving the original input `batch['image']`
+    #             # and making it require grad if it's the very first stage
+    #             # This part of the logic seems missing in the original code but is crucial.
+    #             # For simplicity, we continue storing `None` as per the original code's structure.
+                
+    #         else:
+    #             # THIS IS THE FIX: Receive from the PREVIOUS stage
+    #             input_tensor = recv_tensor_with_header(self.rank - 1, self.device, self.pp_group, dtype=torch.float32)
+    #             input_tensor.requires_grad = True # Make sure to set this for the backward pass
+    #             output_tensor = self.model(input_tensor)
+                
+    #             if not self.is_last_stage:
+    #                 # If not the last stage, send to the next one
+    #                 send_tensor_with_header(output_tensor.detach(), self.rank + 1, self.pp_group)
+
+    #         input_tensors.append(input_tensor)
+    #         output_tensors.append(output_tensor)
+
+    #     # All backward passes (in reverse order)
+    #     for i in range(len(batches) - 1, -1, -1):
+    #         batch = batches[i]
+            
+    #         # Pop the corresponding tensors for this micro-batch
+    #         input_tensor_for_grad = input_tensors.pop()
+    #         output_tensor = output_tensors.pop()
+            
+    #         if self.is_last_stage:
+    #             # Get target labels based on batch structure
+    #             target = batch.get("labels", batch.get("label")).to(device, dtype=torch.long)
+                
+    #             loss = self.criterion(output_tensor, target)
+    #             logging_loss += loss.item()
+    #             loss.backward()
+                
+    #             # Use the correct output tensor for accuracy calculation
+    #             acc += (output_tensor.argmax(dim=1) == target).float().mean().item()
+                
+    #             if input_tensor_for_grad is not None:
+    #                 grad_to_send = input_tensor_for_grad.grad
+    #                 send_tensor_with_header(grad_to_send, self.rank - 1, self.pp_group)
+    #         else:
+    #             # Receive gradient from next stage
+    #             # The dtype should match the output tensor's dtype
+    #             grad_buffer = recv_tensor_with_header(self.rank + 1, device, self.pp_group, dtype=output_tensor.dtype)
+    #             output_tensor.backward(gradient=grad_buffer)
+                
+    #             if not self.is_first_stage and input_tensor_for_grad is not None:
+    #                 grad_to_send = input_tensor_for_grad.grad
+    #                 send_tensor_with_header(grad_to_send, self.rank - 1, self.pp_group)
+
+    #     # Synchronize gradients across all stages
+    #     if requires_grad_sync:
+    #         dist.barrier(group=self.pp_group)
+        
+    #     # Optimizer step
+    #     self.optimizer.step()
+        
+    #     # Calculate average accuracy for the last stage
+    #     if self.is_last_stage:
+    #         acc /= len(batches)
+
+    #     # Return the average loss and accuracy
+    #     return logging_loss / len(batches), acc if self.is_last_stage else 0.0
+    
+    def train_all_forward_and_backward_optimised(self, data_loader, pgm, epoch, requires_grad_sync=True):
         self.model.train()
         self.optimizer.zero_grad()
         input_tensors = []
@@ -139,24 +223,26 @@ class PipelineTrainer:
         
         # Convert data_loader to list to allow multiple iterations
         batches = list(data_loader)
+        num_batches = len(batches)
         
         # All forward passes
         for i, batch in enumerate(tqdm(batches)):
             if self.is_first_stage:
-                output_tensor = self.model(batch['image'].to(device))
-                send_tensor_with_header(output_tensor.detach(), self.rank + 1, self.pp_group)
-                input_tensor = None # First stage has no input tensor from another stage
+                # FIXED: Store the actual input tensor for gradient computation
+                input_data = batch['image'].to(device)
+                input_data.requires_grad = True  # Critical for gradient flow
+                output_tensor = self.model(input_data)
                 
-                # Store the model's direct input for the backward pass
-                # This requires saving the original input `batch['image']`
-                # and making it require grad if it's the very first stage
-                # This part of the logic seems missing in the original code but is crucial.
-                # For simplicity, we continue storing `None` as per the original code's structure.
+                if not self.is_last_stage:  # Only send if not last stage
+                    send_tensor_with_header(output_tensor.detach(), self.rank + 1, self.pp_group)
+                
+                # Store the input data (not None) for backward pass
+                input_tensor = input_data
                 
             else:
-                # THIS IS THE FIX: Receive from the PREVIOUS stage
+                # Receive from the PREVIOUS stage
                 input_tensor = recv_tensor_with_header(self.rank - 1, self.device, self.pp_group, dtype=torch.float32)
-                input_tensor.requires_grad = True # Make sure to set this for the backward pass
+                input_tensor.requires_grad = True  # Make sure to set this for the backward pass
                 output_tensor = self.model(input_tensor)
                 
                 if not self.is_last_stage:
@@ -166,52 +252,87 @@ class PipelineTrainer:
             input_tensors.append(input_tensor)
             output_tensors.append(output_tensor)
 
-        # All backward passes (in reverse order)
+        # All backward passes (in reverse order to match LIFO stack behavior)
         for i in range(len(batches) - 1, -1, -1):
             batch = batches[i]
             
-            # Pop the corresponding tensors for this micro-batch
+            # FIXED: Use pop() to get LIFO order (last stored, first retrieved)
             input_tensor_for_grad = input_tensors.pop()
             output_tensor = output_tensors.pop()
             
             if self.is_last_stage:
-                # Get target labels based on batch structure
-                target = batch.get("labels", batch.get("label")).to(device, dtype=torch.long)
+                # FIXED: Handle both possible label keys
+                if 'labels' in batch:
+                    target = batch['labels'].to(device, dtype=torch.long)
+                elif 'label' in batch:
+                    target = batch['label'].to(device, dtype=torch.long)
+                else:
+                    raise KeyError("Neither 'labels' nor 'label' found in batch")
                 
+                # FIXED: Scale loss by number of micro-batches for proper gradient averaging
                 loss = self.criterion(output_tensor, target)
-                logging_loss += loss.item()
-                loss.backward()
+                scaled_loss = loss / num_batches  # Average the gradients
+                logging_loss += loss.item()  # Log unscaled loss
                 
-                # Use the correct output tensor for accuracy calculation
-                acc += (output_tensor.argmax(dim=1) == target).float().mean().item()
+                scaled_loss.backward()
                 
-                if input_tensor_for_grad is not None:
-                    grad_to_send = input_tensor_for_grad.grad
-                    send_tensor_with_header(grad_to_send, self.rank - 1, self.pp_group)
+                # Calculate accuracy
+                with torch.no_grad():
+                    acc += (output_tensor.argmax(dim=1) == target).float().mean().item()
+                
+                # Send gradient to previous stage (if not first stage)
+                if not self.is_first_stage and input_tensor_for_grad is not None:
+                    if input_tensor_for_grad.grad is not None:
+                        send_tensor_with_header(input_tensor_for_grad.grad, self.rank - 1, self.pp_group)
+                    else:
+                        # Send zero gradient if no gradient computed
+                        zero_grad = torch.zeros_like(input_tensor_for_grad)
+                        send_tensor_with_header(zero_grad, self.rank - 1, self.pp_group)
+                        
             else:
                 # Receive gradient from next stage
-                # The dtype should match the output tensor's dtype
                 grad_buffer = recv_tensor_with_header(self.rank + 1, device, self.pp_group, dtype=output_tensor.dtype)
-                output_tensor.backward(gradient=grad_buffer)
                 
+                # FIXED: Scale the received gradient by number of micro-batches
+                scaled_grad_buffer = grad_buffer / num_batches
+                output_tensor.backward(gradient=scaled_grad_buffer)
+                
+                # Send gradient to previous stage (if not first stage)
                 if not self.is_first_stage and input_tensor_for_grad is not None:
-                    grad_to_send = input_tensor_for_grad.grad
-                    send_tensor_with_header(grad_to_send, self.rank - 1, self.pp_group)
+                    if input_tensor_for_grad.grad is not None:
+                        send_tensor_with_header(input_tensor_for_grad.grad, self.rank - 1, self.pp_group)
+                    else:
+                        # Send zero gradient if no gradient computed
+                        zero_grad = torch.zeros_like(input_tensor_for_grad)
+                        send_tensor_with_header(zero_grad, self.rank - 1, self.pp_group)
 
+        # FIXED: Clear the lists to free memory
+        input_tensors.clear()
+        output_tensors.clear()
+        
         # Synchronize gradients across all stages
         if requires_grad_sync:
             dist.barrier(group=self.pp_group)
         
+        # FIXED: Apply gradient clipping to prevent exploding gradients
+        if hasattr(self, 'max_grad_norm') and self.max_grad_norm > 0:
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.max_grad_norm)
+        
         # Optimizer step
         self.optimizer.step()
         
-        # Calculate average accuracy for the last stage
+        # Calculate average accuracy and loss for the last stage
         if self.is_last_stage:
             acc /= len(batches)
+            logging_loss /= len(batches)
+        else:
+            # Non-last stages should return 0 for consistency
+            acc = 0.0
+            logging_loss = 0.0
 
         # Return the average loss and accuracy
-        return logging_loss / len(batches), acc if self.is_last_stage else 0.0
-    
+        return logging_loss, acc
+
     from collections import deque
 
     def train_one_forward_one_backward(self, data_loader, pgm, epoch):
@@ -274,7 +395,7 @@ class PipelineTrainer:
                     
                     # We scale the loss by the number of micro-batches to average gradients
                     # This is important if your loss function is 'sum' instead of 'mean'
-                    scaled_loss = loss
+                    scaled_loss = loss/num_micro_batches
                     scaled_loss.backward()
 
                     if input_tensor_for_grad is not None:
