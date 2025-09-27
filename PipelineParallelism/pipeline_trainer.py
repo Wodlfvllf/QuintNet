@@ -580,28 +580,56 @@ class PipelineTrainer:
                 # Save tensors needed for the corresponding backward pass
                 fwd_inputs_q.append(input_tensor)
                 fwd_outputs_q.append(output_tensor)
+                print(f"[FWD DEBUG Rank {self.rank}] Completed forward step {i}")
             
             # --- BACKWARD PASS ---
             # Start backward passes after the pipeline is full
             is_bwd_step = i >= pipeline_depth - 1
             if is_bwd_step:
+                bwd_idx = i - pipeline_depth + 1
+                print(f"[BWD DEBUG Rank {self.rank}] Backward step for micro-batch {bwd_idx}")
+                
                 # Get the tensors from the corresponding forward pass
                 input_tensor_for_grad = fwd_inputs_q.popleft()
                 output_tensor_for_grad = fwd_outputs_q.popleft()
 
+                if debug_level >= 2:
+                    self.debugger.log_tensor_stats(output_tensor_for_grad, f"Output_for_BWD_{bwd_idx}", "BWD")
+                
                 if self.is_last_stage:
-                    target = batches[i - pipeline_depth + 1]['label'].to(self.device, dtype=torch.long)
+                    # Last stage computes loss and starts backward
+                    batch = batches[bwd_idx]
+                    target = batch['label'].to(self.device, dtype=torch.long)
+
+                    if debug_level >= 2:
+                        self.debugger.log_tensor_stats(target, f"Target_{bwd_idx}", "BWD")
+                        
                     loss = self.criterion(output_tensor_for_grad, target)
+                    
+                    print(f"[BWD DEBUG Rank {self.rank}] Loss for batch {bwd_idx}: {loss.item():.6f}")
+                    
                     
                     # --- NEW: Accumulate loss and accuracy ---
                     total_loss += loss.item()
-                    total_correct += (output_tensor_for_grad.argmax(dim=1) == target).sum().item()
+                    predictions = output_tensor_for_grad.argmax(dim=1)
+                    correct = (predictions == target).sum().item()
+                    total_correct += correct
+                    
+                    batch_acc = (correct / target.size(0)) * 100
+                    print(f"[BWD DEBUG Rank {self.rank}] Batch {bwd_idx} accuracy: {batch_acc:.2f}%")
                     
                     # We scale the loss by the number of micro-batches to average gradients
                     # This is important if your loss function is 'sum' instead of 'mean'
                     scaled_loss = loss / num_micro_batches
+                    print(f"[BWD DEBUG Rank {self.rank}] Starting backward pass")
                     scaled_loss.backward()
 
+                    if debug_level >= 1:
+                        grad_norm, zero_grads, total_params = self.debugger.check_gradient_flow(
+                            self.model, f"After_BWD_Batch_{bwd_idx}")
+                        if zero_grads > 0:
+                            print(f"[WARNING Rank {self.rank}] {zero_grads}/{total_params} parameters have zero gradients!")
+                    
                     if input_tensor_for_grad is not None:
                         # Scale the gradient before sending
                         grad_to_send = input_tensor_for_grad.grad / num_micro_batches
