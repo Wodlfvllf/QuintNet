@@ -28,33 +28,22 @@ class PipelineParallelWrapper(nn.Module):
         self.is_first_stage = (self.stage_idx == 0)
         self.is_last_stage = (self.stage_idx == self.num_stages - 1)
         
+        def hook(module, input, output):
+            print(f"Layer: {type(module).__name__}, Input shape: {input[0].shape}, Output shape: {output.shape}")
+
+        for layer in self.local_module:
+            layer.register_forward_hook(hook)
+        
         print(f"Rank {self.rank}: Initialized stage {self.stage_idx}/{self.num_stages-1}")
 
-    def _flatten_model_layers(self, module):
-        """Recursively flatten all layers from a model, handling nested containers"""
-        flattened_layers = []
-        
-        for child_module in module.children():
-            if isinstance(child_module, (nn.ModuleList, nn.Sequential)):
-                # If it's a container, recursively flatten it
-                flattened_layers.extend(self._flatten_model_layers(child_module))
-            else:
-                # If it's a regular layer, add it directly
-                flattened_layers.append(child_module)
-        
-        return flattened_layers
-
-
     def _extract_layers_from_model(self, model):
-        """Extract and flatten all layers from model"""
-        # Start with empty list and flatten everything
-        flattened_layers = self._flatten_model_layers(model)
-        
-        if len(flattened_layers) == 0:
-            raise ValueError("Could not extract any layers from model")
-        
-        # Convert to ModuleList for easy indexing
-        layers = nn.ModuleList(flattened_layers)
+        """Extract all layers from model"""
+        layers = nn.ModuleList()
+        for name, module in model.named_children():
+            if name == 'blocks':
+                layers.extend(module)
+            else:
+                layers.append(module)
         
         print(f"Extracted {len(layers)} layers from model:")
         for i, layer in enumerate(layers):
