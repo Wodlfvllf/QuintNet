@@ -668,21 +668,43 @@ class PipelineTrainer:
                 
                 print(f"[BWD DEBUG Rank {self.rank}] Completed backward step for micro-batch {bwd_idx}")
 
+        # Final gradient check before optimizer step
+        if debug_level >= 1:
+            print(f"\n[FINAL DEBUG Rank {self.rank}] Pre-optimizer gradient check:")
+            final_grad_norm, zero_grads, total_params = self.debugger.check_gradient_flow(
+                self.model, "Pre_Optimizer_Step")
+            
+            if final_grad_norm < 1e-8:
+                print(f"[ERROR Rank {self.rank}] Total gradient norm is too small: {final_grad_norm}")
+            if zero_grads == total_params:
+                print(f"[ERROR Rank {self.rank}] ALL gradients are zero!")
+        
+        # Optimizer step
+        print(f"[OPT DEBUG Rank {self.rank}] Taking optimizer step")
         # After the loop, step the optimizer
         self.optimizer.step()
 
-        # --- NEW: Calculate and return final metrics ---
+        # Post-optimizer check
+        if debug_level >= 1:
+            print(f"\n[POST DEBUG Rank {self.rank}] Post-optimizer parameter check:")
+            for name, param in self.model.named_parameters():
+                if param.requires_grad:
+                    param_norm = param.norm().item()
+                    print(f"  {name}: param_norm={param_norm:.8f}")
+        
+        # Calculate final metrics
         if self.is_last_stage:
-            # Calculate average loss over all micro-batches
             avg_loss = total_loss / num_micro_batches
-            
-            # Calculate accuracy over the entire dataset
             total_samples = sum(len(b['label']) for b in batches)
             accuracy = (total_correct / total_samples) * 100
             
+            print(f"\n[RESULT DEBUG Rank {self.rank}] Final Results:")
+            print(f"  Average Loss: {avg_loss:.6f}")
+            print(f"  Accuracy: {accuracy:.2f}%")
+            print(f"  Total Correct: {total_correct}/{total_samples}")
+            
             return avg_loss, accuracy
         else:
-            # Other stages don't have the final metrics
             return 0.0, 0.0
             
     def evaluate(self, val_loader):
