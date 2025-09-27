@@ -204,7 +204,58 @@ class PipelineDebugger:
             'requires_grad': tensor.requires_grad,
             'has_grad': tensor.grad is not None if tensor.requires_grad else False
         }
+
+                # Check for problematic values
+        has_nan = torch.isnan(tensor).any().item()
+        has_inf = torch.isinf(tensor).any().item()
         
+        print(f"[DEBUG Rank {self.rank}] {step} {name}:")
+        print(f"  Shape: {stats['shape']}, Requires_grad: {stats['requires_grad']}")
+        print(f"  Mean: {stats['mean']:.6f}, Std: {stats['std']:.6f}")
+        print(f"  Min: {stats['min']:.6f}, Max: {stats['max']:.6f}")
+        print(f"  Norm: {stats['norm']:.6f}")
+        print(f"  Has NaN: {has_nan}, Has Inf: {has_inf}")
+        
+        if tensor.requires_grad and tensor.grad is not None:
+            grad_norm = tensor.grad.norm().item()
+            grad_mean = tensor.grad.mean().item()
+            print(f"  Grad Norm: {grad_norm:.6f}, Grad Mean: {grad_mean:.6f}")
+        
+        return stats
+    
+    def check_gradient_flow(self, model, step=""):
+        """Check gradient flow through the model"""
+        print(f"\n[GRAD DEBUG Rank {self.rank}] {step} Gradient Flow Check:")
+        
+        total_grad_norm = 0.0
+        layer_count = 0
+        zero_grad_layers = 0
+        
+        for name, param in model.named_parameters():
+            if param.requires_grad:
+                layer_count += 1
+                if param.grad is not None:
+                    grad_norm = param.grad.norm().item()
+                    total_grad_norm += grad_norm ** 2
+                    
+                    # Check for problematic gradients
+                    has_nan_grad = torch.isnan(param.grad).any().item()
+                    has_inf_grad = torch.isinf(param.grad).any().item()
+                    
+                    if grad_norm < 1e-8:
+                        zero_grad_layers += 1
+                    
+                    print(f"  {name}: grad_norm={grad_norm:.8f}, "
+                          f"NaN={has_nan_grad}, Inf={has_inf_grad}")
+                else:
+                    zero_grad_layers += 1
+                    print(f"  {name}: NO GRADIENT")
+        
+        total_grad_norm = total_grad_norm ** 0.5
+        print(f"  Total layers: {layer_count}, Zero grad layers: {zero_grad_layers}")
+        print(f"  Total gradient norm: {total_grad_norm:.8f}")
+        
+        return total_grad_norm, zero_grad_layers, layer_count
 def send_tensor_with_header(tensor: torch.Tensor, dst: int, group=None):
     """Sends a tensor preceded by a header containing its shape and dtype info."""
     # 1. Send the number of dimensions
