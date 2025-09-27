@@ -234,7 +234,7 @@ class PipelineTrainer:
         total_correct = 0
 
         # Main loop processes micro-batches
-        for i in range(num_micro_batches + pipeline_depth - 1):
+        for i in tqdm(range(num_micro_batches + pipeline_depth - 1)):
             # --- FORWARD PASS ---
             is_fwd_step = i < num_micro_batches
             if is_fwd_step:
