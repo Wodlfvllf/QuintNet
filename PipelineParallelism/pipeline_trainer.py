@@ -349,6 +349,10 @@ class PipelineTrainer:
         self.is_first_stage = (self.rank == 0)
         self.is_last_stage = (self.rank == self.world_size - 1)
         
+        # Initialize debugger
+        self.debugger = PipelineDebugger(self.rank, pp_group, self.world_size)
+
+        
         # Buffers to store the tensors that cross the process boundary.
         # These are crucial for manually connecting the backward pass.
         self.input_tensor_for_stage = None
@@ -493,16 +497,25 @@ class PipelineTrainer:
     
     from collections import deque
 
-    def train_one_forward_one_backward(self, data_loader, pgm):
+    def train_one_forward_one_backward(self, data_loader, pgm, debug_level=2):
         self.model.train()
+        
+        print(f"\n[TRAIN DEBUG Rank {self.rank}] Starting training with debug_level={debug_level}")
+
+        # Check initial model state
+        if debug_level >= 1:
+            self.debugger.check_gradient_flow(self.model, "Initial State")
+            
         self.optimizer.zero_grad()
         
         # The number of micro-batches to process before starting backward passes
         # This is also the number of pipeline stages.
         pipeline_depth = self.world_size 
-        
         batches = list(data_loader)
         num_micro_batches = len(batches)
+        
+        print(f"[TRAIN DEBUG Rank {self.rank}] Processing {num_micro_batches} micro-batches, "
+              f"pipeline_depth={pipeline_depth}")
         
         # Queues to hold data for forward and backward passes for each stage
         fwd_inputs_q = deque()
@@ -515,11 +528,21 @@ class PipelineTrainer:
         # Main loop processes micro-batches
         for i in range(num_micro_batches + pipeline_depth - 1):
             # --- FORWARD PASS ---
+            print(f"\n[STEP DEBUG Rank {self.rank}] === Step {i} ===")
             is_fwd_step = i < num_micro_batches
             if is_fwd_step:
+                print(f"[FWD DEBUG Rank {self.rank}] Forward step {i}")
                 if self.is_first_stage:
                     # First stage gets data from loader
                     input_tensor = batches[i]['image'].to(self.device)
+                    
+                    if debug_level >= 2:
+                        self.debugger.log_tensor_stats(input_tensor, f"Input_Batch_{i}", "FWD")
+                        # Verify input data consistency
+                        self.debugger.verify_data_sync(input_tensor, f"Input_Batch_{i}", "FWD")
+                    
+                    print(f"[FWD DEBUG Rank {self.rank}] Processing input batch {i}, shape: {input_tensor.shape}")
+
                     output_tensor = self.model(input_tensor)
                     send_tensor_with_header(output_tensor.detach(), self.rank + 1, self.pp_group)
                 else:
