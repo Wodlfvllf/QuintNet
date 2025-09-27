@@ -4,6 +4,367 @@ import torch.nn as nn
 from .Processgroup import ProcessGroupManager
 from .pp_wrapper import PipelineParallelWrapper
 from .operations import Send, Recv
+import torch
+import torch.distributed as dist
+from tqdm import tqdm
+
+def send_tensor_with_header(tensor: torch.Tensor, dst: int, group=None):
+    """Sends a tensor preceded by a header containing its shape and dtype info."""
+    # 1. Send the number of dimensions
+    num_dims = torch.tensor([tensor.dim()], dtype=torch.long, device=tensor.device)
+    dist.send(tensor=num_dims, dst=dst, group=group)
+
+    # 2. Send the shape
+    shape_tensor = torch.tensor(tensor.shape, dtype=torch.long, device=tensor.device)
+    dist.send(tensor=shape_tensor, dst=dst, group=group)
+
+    # 3. Send the tensor data
+    dist.send(tensor=tensor.contiguous(), dst=dst, group=group)
+
+def recv_tensor_with_header(src: int, device: torch.device, group=None, dtype=torch.float32) -> torch.Tensor:
+    """Receives a tensor that is preceded by a shape and dtype header."""
+    # 1. Receive the number of dimensions
+    num_dims_tensor = torch.zeros(1, dtype=torch.long, device=device)
+    dist.recv(tensor=num_dims_tensor, src=src, group=group)
+    num_dims = num_dims_tensor.item()
+
+    # 2. Receive the shape
+    shape_tensor = torch.zeros(num_dims, dtype=torch.long, device=device)
+    dist.recv(tensor=shape_tensor, src=src, group=group)
+    tensor_shape = shape_tensor.tolist()
+    
+    # 3. Create a correctly shaped buffer and receive the tensor data
+    buffer = torch.zeros(tensor_shape, dtype=dtype, device=device)
+    dist.recv(tensor=buffer, src=src, group=group)
+    
+    return buffer
+
+import torch
+import torch.distributed as dist
+import torch.nn as nn
+from collections import deque
+
+class PipelineTrainer:
+    def __init__(self, model, pp_group, criterion, device):
+        """
+        Initializes the trainer for pipeline parallelism.
+        
+        Args:
+            model: The model, already wrapped in PipelineParallelWrapper.
+            pp_group: The process group for the pipeline.
+            optimizer: A pre-configured optimizer for the local model parameters.
+            criterion: The loss function.
+            device: The device for the current rank.
+        """
+        self.model = model
+        self.pp_group = pp_group
+        self.optimizer = torch.optim.Adam(self.model.parameters(), lr=0.001)
+        self.criterion = criterion
+        self.device = device
+        
+        # Get rank and size from the specific pipeline group
+        self.rank = dist.get_rank(group=pp_group)
+        self.world_size = dist.get_world_size(group=pp_group)
+        
+        # Flags for stage position
+        self.is_first_stage = (self.rank == 0)
+        self.is_last_stage = (self.rank == self.world_size - 1)
+        
+        # Buffers to store the tensors that cross the process boundary.
+        # These are crucial for manually connecting the backward pass.
+        self.input_tensor_for_stage = None
+        self.output_tensor_of_stage = None
+        
+        print(f"PipelineTrainer initialized - Rank: {self.rank}, Stage: {self.rank}")
+
+    def train_step_naive(self, input_data, target):
+        self.model.train()
+        self.optimizer.zero_grad()
+
+        # --- 1. FORWARD PASS CHAIN ---
+        if self.is_first_stage:
+            self.output_tensor_of_stage = self.model(input_data.to(self.device))
+            # MODIFIED: Use the helper to send the tensor and its metadata.
+            send_tensor_with_header(self.output_tensor_of_stage.detach(), self.rank + 1, self.pp_group)
+        
+        else: # For last and intermediate stages
+            # MODIFIED: Use the helper to receive. It discovers the shape automatically.
+            buffer = recv_tensor_with_header(self.rank - 1, self.device, self.pp_group, dtype=input_data.dtype)
+            
+            self.input_tensor_for_stage = buffer
+            self.input_tensor_for_stage.requires_grad = True
+            
+            self.output_tensor_of_stage = self.model(self.input_tensor_for_stage)
+            
+            if not self.is_last_stage:
+                send_tensor_with_header(self.output_tensor_of_stage.detach(), self.rank + 1, self.pp_group)
+
+        # --- 2. BACKWARD PASS CHAIN (in reverse) ---
+        if self.is_last_stage:
+            loss = self.criterion(self.output_tensor_of_stage, target.to(device=self.device, dtype=torch.long))
+            loss.backward()
+            
+            # MODIFIED: Use the helper to send the gradient and its metadata.
+            grad_to_send = self.input_tensor_for_stage.grad
+            send_tensor_with_header(grad_to_send, self.rank - 1, self.pp_group)
+            
+        else: # For first and intermediate stages
+            # MODIFIED: Use the helper to receive the gradient.
+            # We know the gradient will have the same shape and dtype as our stage's output.
+            grad_buffer = recv_tensor_with_header(self.rank + 1, self.device, self.pp_group, dtype=self.output_tensor_of_stage.dtype)
+            
+            self.output_tensor_of_stage.backward(gradient=grad_buffer)
+            
+            if not self.is_first_stage:
+                grad_to_send = self.input_tensor_for_stage.grad
+                send_tensor_with_header(grad_to_send, self.rank - 1, self.pp_group)
+        
+        # --- 3. OPTIMIZER STEP ---
+        self.optimizer.step()
+        
+        if self.is_last_stage:
+            acc = (self.output_tensor_of_stage.argmax(dim=1) == target.to(self.device)).float().mean().item()
+            return loss.item(), acc * 100
+        else:
+            return None, None
+    
+    def train_all_forward_and_backward_optimised(self, data_loader, pgm, requires_grad_sync=True):
+        self.model.train()
+        self.optimizer.zero_grad()
+        input_tensors = []
+        output_tensors = []
+        logging_loss = 0.0
+        device = self.device
+        acc = 0.0
+        
+        # Convert data_loader to list to allow multiple iterations
+        batches = list(data_loader)
+        
+        # All forward passes
+        for i, batch in enumerate(tqdm(batches)):
+            if self.is_first_stage:
+                output_tensor = self.model(batch['image'].to(device))
+                send_tensor_with_header(output_tensor.detach(), self.rank + 1, self.pp_group)
+                input_tensor = None # First stage has no input tensor from another stage
+                
+                # Store the model's direct input for the backward pass
+                # This requires saving the original input `batch['image']`
+                # and making it require grad if it's the very first stage
+                # This part of the logic seems missing in the original code but is crucial.
+                # For simplicity, we continue storing `None` as per the original code's structure.
+                
+            else:
+                # THIS IS THE FIX: Receive from the PREVIOUS stage
+                input_tensor = recv_tensor_with_header(self.rank - 1, self.device, self.pp_group, dtype=torch.float32)
+                input_tensor.requires_grad = True # Make sure to set this for the backward pass
+                output_tensor = self.model(input_tensor)
+                
+                if not self.is_last_stage:
+                    # If not the last stage, send to the next one
+                    send_tensor_with_header(output_tensor.detach(), self.rank + 1, self.pp_group)
+
+            input_tensors.append(input_tensor)
+            output_tensors.append(output_tensor)
+
+        # All backward passes (in reverse order)
+        for i in range(len(batches) - 1, -1, -1):
+            batch = batches[i]
+            
+            # Pop the corresponding tensors for this micro-batch
+            input_tensor_for_grad = input_tensors.pop()
+            output_tensor = output_tensors.pop()
+            
+            if self.is_last_stage:
+                # Get target labels based on batch structure
+                target = batch.get("labels", batch.get("label")).to(device, dtype=torch.long)
+                
+                loss = self.criterion(output_tensor, target)
+                logging_loss += loss.item()
+                loss.backward()
+                
+                # Use the correct output tensor for accuracy calculation
+                acc += (output_tensor.argmax(dim=1) == target).float().mean().item()
+                
+                if input_tensor_for_grad is not None:
+                    grad_to_send = input_tensor_for_grad.grad
+                    send_tensor_with_header(grad_to_send, self.rank - 1, self.pp_group)
+            else:
+                # Receive gradient from next stage
+                # The dtype should match the output tensor's dtype
+                grad_buffer = recv_tensor_with_header(self.rank + 1, device, self.pp_group, dtype=output_tensor.dtype)
+                output_tensor.backward(gradient=grad_buffer)
+                
+                if not self.is_first_stage and input_tensor_for_grad is not None:
+                    grad_to_send = input_tensor_for_grad.grad
+                    send_tensor_with_header(grad_to_send, self.rank - 1, self.pp_group)
+
+        # Synchronize gradients across all stages
+        if requires_grad_sync:
+            dist.barrier(group=self.pp_group)
+        
+        # Optimizer step
+        self.optimizer.step()
+        
+        # Calculate average accuracy for the last stage
+        if self.is_last_stage:
+            acc /= len(batches)
+
+        # Return the average loss and accuracy
+        return logging_loss / len(batches), acc if self.is_last_stage else 0.0
+    
+    from collections import deque
+
+    def train_one_forward_one_backward(self, data_loader, pgm):
+        self.model.train()
+        self.optimizer.zero_grad()
+        
+        # The number of micro-batches to process before starting backward passes
+        # This is also the number of pipeline stages.
+        pipeline_depth = self.world_size 
+        
+        batches = list(data_loader)
+        num_micro_batches = len(batches)
+        
+        # Queues to hold data for forward and backward passes for each stage
+        fwd_inputs_q = deque()
+        fwd_outputs_q = deque()
+
+        # --- NEW: Accumulators for metrics ---
+        total_loss = 0.0
+        total_correct = 0
+
+        # Main loop processes micro-batches
+        for i in range(num_micro_batches + pipeline_depth - 1):
+            # --- FORWARD PASS ---
+            is_fwd_step = i < num_micro_batches
+            if is_fwd_step:
+                if self.is_first_stage:
+                    # First stage gets data from loader
+                    input_tensor = batches[i]['image'].to(self.device)
+                    output_tensor = self.model(input_tensor)
+                    send_tensor_with_header(output_tensor.detach(), self.rank + 1, self.pp_group)
+                else:
+                    input_tensor = recv_tensor_with_header(self.rank - 1, self.device, self.pp_group)
+                    input_tensor.requires_grad = True
+                    output_tensor = self.model(input_tensor)
+                    if not self.is_last_stage:
+                        send_tensor_with_header(output_tensor.detach(), self.rank + 1, self.pp_group)
+
+                # Save tensors needed for the corresponding backward pass
+                fwd_inputs_q.append(input_tensor)
+                fwd_outputs_q.append(output_tensor)
+            
+            # --- BACKWARD PASS ---
+            # Start backward passes after the pipeline is full
+            is_bwd_step = i >= pipeline_depth - 1
+            if is_bwd_step:
+                # Get the tensors from the corresponding forward pass
+                input_tensor_for_grad = fwd_inputs_q.popleft()
+                output_tensor_for_grad = fwd_outputs_q.popleft()
+
+                if self.is_last_stage:
+                    target = batches[i - pipeline_depth + 1]['label'].to(self.device, dtype=torch.long)
+                    loss = self.criterion(output_tensor_for_grad, target)
+                    
+                    # --- NEW: Accumulate loss and accuracy ---
+                    total_loss += loss.item()
+                    total_correct += (output_tensor_for_grad.argmax(dim=1) == target).sum().item()
+                    
+                    # We scale the loss by the number of micro-batches to average gradients
+                    # This is important if your loss function is 'sum' instead of 'mean'
+                    scaled_loss = loss / num_micro_batches
+                    scaled_loss.backward()
+
+                    if input_tensor_for_grad is not None:
+                        # Scale the gradient before sending
+                        grad_to_send = input_tensor_for_grad.grad / num_micro_batches
+                        send_tensor_with_header(grad_to_send, self.rank - 1, self.pp_group)
+                else:
+                    grad_buffer = recv_tensor_with_header(self.rank + 1, self.device, self.pp_group)
+                    output_tensor_for_grad.backward(gradient=grad_buffer)
+                    
+                    if not self.is_first_stage and input_tensor_for_grad is not None:
+                        # Note: grad is already scaled from the previous stage
+                        send_tensor_with_header(input_tensor_for_grad.grad, self.rank - 1, self.pp_group)
+
+        # After the loop, step the optimizer
+        self.optimizer.step()
+
+        # --- NEW: Calculate and return final metrics ---
+        if self.is_last_stage:
+            # Calculate average loss over all micro-batches
+            avg_loss = total_loss / num_micro_batches
+            
+            # Calculate accuracy over the entire dataset
+            total_samples = sum(len(b['label']) for b in batches)
+            accuracy = (total_correct / total_samples) * 100
+            
+            return avg_loss, accuracy
+        else:
+            # Other stages don't have the final metrics
+            return 0.0, 0.0
+            
+    def evaluate(self, val_loader):
+        self.model.eval()
+        total_loss = 0.0
+        total_correct = 0
+        total_samples = 0
+        
+        with torch.no_grad():
+            for batch in val_loader:
+                images = batch['image']
+                targets = batch['label']
+
+                if self.is_first_stage:
+                    output = self.model(images.to(self.device))
+                    if not self.is_last_stage:
+                        # MODIFIED: Use the helper for evaluation as well.
+                        send_tensor_with_header(output, self.rank + 1, self.pp_group)
+                else:
+                    # MODIFIED: The helper removes the need for get_input_shape.
+                    buffer = recv_tensor_with_header(self.rank - 1, self.device, self.pp_group, dtype=images.dtype)
+                    output = self.model(buffer)
+                    if not self.is_last_stage:
+                        send_tensor_with_header(output, self.rank + 1, self.pp_group)
+
+                if self.is_last_stage:
+                    targets = targets.to(self.device, dtype=torch.long)
+                    loss = self.criterion(output, targets)
+                    total_loss += loss.item() * output.size(0)
+                    total_correct += (output.argmax(dim=1) == targets).sum().item()
+                    total_samples += output.size(0)
+
+        dist.barrier(group=self.pp_group)
+        
+        if self.is_last_stage:
+            avg_loss = total_loss / total_samples if total_samples > 0 else 0.0
+            accuracy = (total_correct / total_samples * 100) if total_samples > 0 else 0.0
+            return avg_loss, accuracy
+        else:
+            return None, None
+        
+        
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 # class PipelineTrainer:
@@ -163,803 +524,3 @@ from .operations import Send, Recv
 #             return None, None
 
 # Place these helpers at the top of pipeline_trainer.py
-
-import torch
-import torch.distributed as dist
-from tqdm import tqdm
-import torch
-import torch.distributed as dist
-import numpy as np
-from collections import defaultdict
-import time
-import torch
-import torch.distributed as dist
-import time
-from contextlib import contextmanager
-
-class CommunicationDebugger:
-    """Debug communication patterns and detect deadlocks"""
-    
-    def __init__(self, rank, world_size, pp_group):
-        self.rank = rank
-        self.world_size = world_size
-        self.pp_group = pp_group
-        self.send_count = 0
-        self.recv_count = 0
-        self.comm_log = []
-    
-    def log_communication(self, operation, peer_rank, tensor_info="", step=""):
-        """Log all communication operations"""
-        timestamp = time.time()
-        log_entry = {
-            'timestamp': timestamp,
-            'rank': self.rank,
-            'operation': operation,
-            'peer_rank': peer_rank,
-            'tensor_info': tensor_info,
-            'step': step
-        }
-        self.comm_log.append(log_entry)
-        
-        print(f"[COMM LOG Rank {self.rank}] {step} {operation} {'to' if 'send' in operation else 'from'} "
-              f"rank {peer_rank} - {tensor_info}")
-    
-    def check_communication_balance(self):
-        """Check if sends and receives are balanced"""
-        sends = sum(1 for entry in self.comm_log if 'send' in entry['operation'])
-        recvs = sum(1 for entry in self.comm_log if 'recv' in entry['operation'])
-        
-        print(f"[COMM BALANCE Rank {self.rank}] Sends: {sends}, Receives: {recvs}")
-        
-        if abs(sends - recvs) > self.world_size:  # Allow some imbalance due to pipeline
-            print(f"[COMM WARNING Rank {self.rank}] Significant imbalance detected!")
-        
-        return sends, recvs
-
-@contextmanager
-def timeout_context(seconds=30):
-    """Context manager for detecting hanging operations"""
-    start_time = time.time()
-    try:
-        yield
-    finally:
-        elapsed = time.time() - start_time
-        if elapsed > seconds:
-            print(f"[TIMEOUT WARNING] Operation took {elapsed:.2f} seconds!")
-
-def safe_send_tensor_with_header(tensor: torch.Tensor, dst: int, group=None, 
-                                 rank=None, timeout=60, step=""):
-    """Safe version of send_tensor_with_header with debugging and timeout"""
-    
-    print(f"[SAFE SEND Rank {rank}] {step} Attempting to send to rank {dst}")
-    print(f"  Tensor shape: {tensor.shape}, dtype: {tensor.dtype}")
-    
-    try:
-        start_time = time.time()
-        
-        # Add synchronization point before critical communication
-        if group:
-            print(f"[SAFE SEND Rank {rank}] Synchronizing before send...")
-            dist.barrier(group=group)
-        
-        # 1. Send the number of dimensions
-        num_dims = torch.tensor([tensor.dim()], dtype=torch.long, device=tensor.device)
-        print(f"[SAFE SEND Rank {rank}] Sending num_dims: {num_dims.item()}")
-        dist.send(tensor=num_dims, dst=dst, group=group)
-        
-        elapsed = time.time() - start_time
-        if elapsed > 5:
-            print(f"[TIMEOUT WARNING Rank {rank}] num_dims send took {elapsed:.2f}s")
-
-        # 2. Send the shape
-        shape_tensor = torch.tensor(tensor.shape, dtype=torch.long, device=tensor.device)
-        print(f"[SAFE SEND Rank {rank}] Sending shape: {shape_tensor.tolist()}")
-        dist.send(tensor=shape_tensor, dst=dst, group=group)
-        
-        elapsed = time.time() - start_time
-        if elapsed > 10:
-            print(f"[TIMEOUT WARNING Rank {rank}] shape send took {elapsed:.2f}s")
-
-        # 3. Send the tensor data
-        contiguous_tensor = tensor.contiguous()
-        print(f"[SAFE SEND Rank {rank}] Sending tensor data...")
-        dist.send(tensor=contiguous_tensor, dst=dst, group=group)
-        
-        total_elapsed = time.time() - start_time
-        print(f"[SAFE SEND Rank {rank}] ✅ Send completed in {total_elapsed:.2f}s")
-        
-        if total_elapsed > timeout:
-            print(f"[ERROR Rank {rank}] Send operation timed out after {total_elapsed:.2f}s!")
-            
-    except Exception as e:
-        print(f"[ERROR Rank {rank}] Send failed: {e}")
-        raise
-
-def safe_recv_tensor_with_header(src: int, device: torch.device, group=None,
-                                dtype=torch.float32, rank=None, timeout=60, step=""):
-    """Safe version of recv_tensor_with_header with debugging and timeout"""
-    
-    print(f"[SAFE RECV Rank {rank}] {step} Attempting to receive from rank {src}")
-    
-    try:
-        start_time = time.time()
-        
-        # Add synchronization point before critical communication
-        if group:
-            print(f"[SAFE RECV Rank {rank}] Synchronizing before recv...")
-            dist.barrier(group=group)
-        
-        # 1. Receive the number of dimensions
-        num_dims_tensor = torch.zeros(1, dtype=torch.long, device=device)
-        print(f"[SAFE RECV Rank {rank}] Waiting for num_dims from rank {src}...")
-        dist.recv(tensor=num_dims_tensor, src=src, group=group)
-        num_dims = num_dims_tensor.item()
-        print(f"[SAFE RECV Rank {rank}] Received num_dims: {num_dims}")
-        
-        elapsed = time.time() - start_time
-        if elapsed > 5:
-            print(f"[TIMEOUT WARNING Rank {rank}] num_dims recv took {elapsed:.2f}s")
-
-        # 2. Receive the shape
-        shape_tensor = torch.zeros(num_dims, dtype=torch.long, device=device)
-        print(f"[SAFE RECV Rank {rank}] Waiting for shape...")
-        dist.recv(tensor=shape_tensor, src=src, group=group)
-        tensor_shape = shape_tensor.tolist()
-        print(f"[SAFE RECV Rank {rank}] Received shape: {tensor_shape}")
-        
-        elapsed = time.time() - start_time
-        if elapsed > 10:
-            print(f"[TIMEOUT WARNING Rank {rank}] shape recv took {elapsed:.2f}s")
-        
-        # 3. Create a correctly shaped buffer and receive the tensor data
-        buffer = torch.zeros(tensor_shape, dtype=dtype, device=device)
-        print(f"[SAFE RECV Rank {rank}] Waiting for tensor data...")
-        dist.recv(tensor=buffer, src=src, group=group)
-        
-        total_elapsed = time.time() - start_time
-        print(f"[SAFE RECV Rank {rank}] ✅ Receive completed in {total_elapsed:.2f}s")
-        
-        if total_elapsed > timeout:
-            print(f"[ERROR Rank {rank}] Receive operation timed out after {total_elapsed:.2f}s!")
-        
-        return buffer
-        
-    except Exception as e:
-        print(f"[ERROR Rank {rank}] Receive failed: {e}")
-        raise
-
-def debug_communication_pattern(rank, world_size, num_micro_batches, pipeline_depth):
-    """Debug the expected communication pattern"""
-    
-    print(f"\n[COMM PATTERN DEBUG Rank {rank}] Expected communication pattern:")
-    print(f"  Pipeline depth: {pipeline_depth}")
-    print(f"  Micro-batches: {num_micro_batches}")
-    print(f"  Total steps: {num_micro_batches + pipeline_depth - 1}")
-    
-    expected_sends = []
-    expected_recvs = []
-    
-    for i in range(num_micro_batches + pipeline_depth - 1):
-        step_info = f"Step {i}:"
-        
-        # Forward pass
-        if i < num_micro_batches:
-            if rank == 0:  # First stage
-                expected_sends.append(f"FWD step {i} -> rank 1")
-                step_info += f" FWD send to {rank + 1}"
-            elif rank == world_size - 1:  # Last stage
-                expected_recvs.append(f"FWD step {i} <- rank {rank - 1}")
-                step_info += f" FWD recv from {rank - 1}"
-            else:  # Middle stages
-                expected_recvs.append(f"FWD step {i} <- rank {rank - 1}")
-                expected_sends.append(f"FWD step {i} -> rank {rank + 1}")
-                step_info += f" FWD recv from {rank - 1}, send to {rank + 1}"
-        
-        # Backward pass
-        if i >= pipeline_depth - 1:
-            bwd_step = i - pipeline_depth + 1
-            if rank == world_size - 1:  # Last stage
-                if rank > 0:
-                    expected_sends.append(f"BWD step {bwd_step} -> rank {rank - 1}")
-                    step_info += f" BWD send to {rank - 1}"
-            elif rank == 0:  # First stage
-                expected_recvs.append(f"BWD step {bwd_step} <- rank {rank + 1}")
-                step_info += f" BWD recv from {rank + 1}"
-            else:  # Middle stages
-                expected_recvs.append(f"BWD step {bwd_step} <- rank {rank + 1}")
-                expected_sends.append(f"BWD step {bwd_step} -> rank {rank - 1}")
-                step_info += f" BWD recv from {rank + 1}, send to {rank - 1}"
-        
-        print(f"    {step_info}")
-    
-    print(f"\n[COMM PATTERN DEBUG Rank {rank}] Summary:")
-    print(f"  Expected sends: {len(expected_sends)}")
-    for send in expected_sends[:5]:  # Show first 5
-        print(f"    {send}")
-    if len(expected_sends) > 5:
-        print(f"    ... and {len(expected_sends) - 5} more")
-    
-    print(f"  Expected receives: {len(expected_recvs)}")
-    for recv in expected_recvs[:5]:  # Show first 5
-        print(f"    {recv}")
-    if len(expected_recvs) > 5:
-        print(f"    ... and {len(expected_recvs) - 5} more")
-        
-        
-class PipelineDebugger:
-    """Comprehensive debugging utility for pipeline parallelism"""
-    
-    def __init__(self, rank, pp_group, world_size):
-        self.rank = rank
-        self.pp_group = pp_group
-        self.world_size = world_size
-        self.is_first_stage = (rank == 0)
-        self.is_last_stage = (rank == world_size - 1)
-        
-        # Debug counters and accumulators
-        self.forward_count = 0
-        self.backward_count = 0
-        self.tensor_stats = defaultdict(list)
-        
-    def log_tensor_stats(self, tensor, name, step=""):
-        """Log comprehensive tensor statistics"""
-        if tensor is None:
-            print(f"[DEBUG Rank {self.rank}] {step} {name}: NONE")
-            return
-            
-        stats = {
-            'mean': tensor.mean().item(),
-            'std': tensor.std().item(),
-            'min': tensor.min().item(),
-            'max': tensor.max().item(),
-            'norm': tensor.norm().item(),
-            'shape': list(tensor.shape),
-            'requires_grad': tensor.requires_grad,
-            'has_grad': tensor.grad is not None if tensor.requires_grad else False
-        }
-
-                # Check for problematic values
-        has_nan = torch.isnan(tensor).any().item()
-        has_inf = torch.isinf(tensor).any().item()
-        
-        print(f"[DEBUG Rank {self.rank}] {step} {name}:")
-        print(f"  Shape: {stats['shape']}, Requires_grad: {stats['requires_grad']}")
-        print(f"  Mean: {stats['mean']:.6f}, Std: {stats['std']:.6f}")
-        print(f"  Min: {stats['min']:.6f}, Max: {stats['max']:.6f}")
-        print(f"  Norm: {stats['norm']:.6f}")
-        print(f"  Has NaN: {has_nan}, Has Inf: {has_inf}")
-        
-        if tensor.requires_grad and tensor.grad is not None:
-            grad_norm = tensor.grad.norm().item()
-            grad_mean = tensor.grad.mean().item()
-            print(f"  Grad Norm: {grad_norm:.6f}, Grad Mean: {grad_mean:.6f}")
-        
-        return stats
-    
-    def check_gradient_flow(self, model, step=""):
-        """Check gradient flow through the model"""
-        print(f"\n[GRAD DEBUG Rank {self.rank}] {step} Gradient Flow Check:")
-        
-        total_grad_norm = 0.0
-        layer_count = 0
-        zero_grad_layers = 0
-        
-        for name, param in model.named_parameters():
-            if param.requires_grad:
-                layer_count += 1
-                if param.grad is not None:
-                    grad_norm = param.grad.norm().item()
-                    total_grad_norm += grad_norm ** 2
-                    
-                    # Check for problematic gradients
-                    has_nan_grad = torch.isnan(param.grad).any().item()
-                    has_inf_grad = torch.isinf(param.grad).any().item()
-                    
-                    if grad_norm < 1e-8:
-                        zero_grad_layers += 1
-                    
-                    print(f"  {name}: grad_norm={grad_norm:.8f}, "
-                          f"NaN={has_nan_grad}, Inf={has_inf_grad}")
-                else:
-                    zero_grad_layers += 1
-                    print(f"  {name}: NO GRADIENT")
-        
-        total_grad_norm = total_grad_norm ** 0.5
-        print(f"  Total layers: {layer_count}, Zero grad layers: {zero_grad_layers}")
-        print(f"  Total gradient norm: {total_grad_norm:.8f}")
-        
-        return total_grad_norm, zero_grad_layers, layer_count
-    
-    def verify_data_sync(self, data, name, step=""):
-        """Verify data synchronization across ranks"""
-        if data is None:
-            print(f"[SYNC DEBUG] {step} {name}: Data is None on rank {self.rank}")
-            return
-            
-        # Compute local checksum
-        local_sum = data.sum().item()
-        local_mean = data.mean().item()
-        
-        # Gather from all ranks
-        gathered_sums = [None] * self.world_size
-        gathered_means = [None] * self.world_size
-        
-        dist.all_gather_object(gathered_sums, local_sum, group=self.pp_group)
-        dist.all_gather_object(gathered_means, local_mean, group=self.pp_group)
-        
-        if self.rank == 0:
-            print(f"[SYNC DEBUG] {step} {name} - Sums across ranks: {gathered_sums}")
-            print(f"[SYNC DEBUG] {step} {name} - Means across ranks: {gathered_means}")
-            
-            # Check consistency
-            sum_diff = max(gathered_sums) - min(gathered_sums)
-            mean_diff = max(gathered_means) - min(gathered_means)
-            
-            if sum_diff < 1e-6:
-                print(f"[SYNC DEBUG] ✓ {name} is synchronized across ranks")
-            else:
-                print(f"[SYNC DEBUG] ✗ {name} differs across ranks! Sum diff: {sum_diff}")
-
-def send_tensor_with_header(tensor: torch.Tensor, dst: int, group=None):
-    """Sends a tensor preceded by a header containing its shape and dtype info."""
-    # 1. Send the number of dimensions
-    num_dims = torch.tensor([tensor.dim()], dtype=torch.long, device=tensor.device)
-    dist.send(tensor=num_dims, dst=dst, group=group)
-
-    # 2. Send the shape
-    shape_tensor = torch.tensor(tensor.shape, dtype=torch.long, device=tensor.device)
-    dist.send(tensor=shape_tensor, dst=dst, group=group)
-
-    # 3. Send the tensor data
-    dist.send(tensor=tensor.contiguous(), dst=dst, group=group)
-
-def recv_tensor_with_header(src: int, device: torch.device, group=None, dtype=torch.float32) -> torch.Tensor:
-    """Receives a tensor that is preceded by a shape and dtype header."""
-    # 1. Receive the number of dimensions
-    num_dims_tensor = torch.zeros(1, dtype=torch.long, device=device)
-    dist.recv(tensor=num_dims_tensor, src=src, group=group)
-    num_dims = num_dims_tensor.item()
-
-    # 2. Receive the shape
-    shape_tensor = torch.zeros(num_dims, dtype=torch.long, device=device)
-    dist.recv(tensor=shape_tensor, src=src, group=group)
-    tensor_shape = shape_tensor.tolist()
-    
-    # 3. Create a correctly shaped buffer and receive the tensor data
-    buffer = torch.zeros(tensor_shape, dtype=dtype, device=device)
-    dist.recv(tensor=buffer, src=src, group=group)
-    
-    return buffer
-
-import torch
-import torch.distributed as dist
-import torch.nn as nn
-from collections import deque
-
-class PipelineTrainer:
-    def __init__(self, model, pp_group, criterion, device):
-        """
-        Initializes the trainer for pipeline parallelism.
-        
-        Args:
-            model: The model, already wrapped in PipelineParallelWrapper.
-            pp_group: The process group for the pipeline.
-            optimizer: A pre-configured optimizer for the local model parameters.
-            criterion: The loss function.
-            device: The device for the current rank.
-        """
-        self.model = model
-        self.pp_group = pp_group
-        self.optimizer = torch.optim.Adam(self.model.parameters(), lr=0.001)
-        self.criterion = criterion
-        self.device = device
-        
-        # Get rank and size from the specific pipeline group
-        self.rank = dist.get_rank(group=pp_group)
-        self.world_size = dist.get_world_size(group=pp_group)
-        
-        # Flags for stage position
-        self.is_first_stage = (self.rank == 0)
-        self.is_last_stage = (self.rank == self.world_size - 1)
-        
-        # Initialize debugger
-        self.debugger = PipelineDebugger(self.rank, pp_group, self.world_size)
-
-        
-        # Buffers to store the tensors that cross the process boundary.
-        # These are crucial for manually connecting the backward pass.
-        self.input_tensor_for_stage = None
-        self.output_tensor_of_stage = None
-        
-        print(f"PipelineTrainer initialized - Rank: {self.rank}, Stage: {self.rank}")
-
-    def train_step_naive(self, input_data, target):
-        self.model.train()
-        self.optimizer.zero_grad()
-
-        # --- 1. FORWARD PASS CHAIN ---
-        if self.is_first_stage:
-            self.output_tensor_of_stage = self.model(input_data.to(self.device))
-            # MODIFIED: Use the helper to send the tensor and its metadata.
-            send_tensor_with_header(self.output_tensor_of_stage.detach(), self.rank + 1, self.pp_group)
-        
-        else: # For last and intermediate stages
-            # MODIFIED: Use the helper to receive. It discovers the shape automatically.
-            buffer = recv_tensor_with_header(self.rank - 1, self.device, self.pp_group, dtype=input_data.dtype)
-            
-            self.input_tensor_for_stage = buffer
-            self.input_tensor_for_stage.requires_grad = True
-            
-            self.output_tensor_of_stage = self.model(self.input_tensor_for_stage)
-            
-            if not self.is_last_stage:
-                send_tensor_with_header(self.output_tensor_of_stage.detach(), self.rank + 1, self.pp_group)
-
-        # --- 2. BACKWARD PASS CHAIN (in reverse) ---
-        if self.is_last_stage:
-            loss = self.criterion(self.output_tensor_of_stage, target.to(device=self.device, dtype=torch.long))
-            loss.backward()
-            
-            # MODIFIED: Use the helper to send the gradient and its metadata.
-            grad_to_send = self.input_tensor_for_stage.grad
-            send_tensor_with_header(grad_to_send, self.rank - 1, self.pp_group)
-            
-        else: # For first and intermediate stages
-            # MODIFIED: Use the helper to receive the gradient.
-            # We know the gradient will have the same shape and dtype as our stage's output.
-            grad_buffer = recv_tensor_with_header(self.rank + 1, self.device, self.pp_group, dtype=self.output_tensor_of_stage.dtype)
-            
-            self.output_tensor_of_stage.backward(gradient=grad_buffer)
-            
-            if not self.is_first_stage:
-                grad_to_send = self.input_tensor_for_stage.grad
-                send_tensor_with_header(grad_to_send, self.rank - 1, self.pp_group)
-        
-        # --- 3. OPTIMIZER STEP ---
-        self.optimizer.step()
-        
-        if self.is_last_stage:
-            acc = (self.output_tensor_of_stage.argmax(dim=1) == target.to(self.device)).float().mean().item()
-            return loss.item(), acc * 100
-        else:
-            return None, None
-    
-    def train_all_forward_and_backward_optimised(self, data_loader, pgm, requires_grad_sync=True):
-        self.model.train()
-        self.optimizer.zero_grad()
-        input_tensors = []
-        output_tensors = []
-        logging_loss = 0.0
-        device = self.device
-        acc = 0.0
-        
-        # Convert data_loader to list to allow multiple iterations
-        batches = list(data_loader)
-        
-        # All forward passes
-        for i, batch in enumerate(tqdm(batches)):
-            if self.is_first_stage:
-                output_tensor = self.model(batch['image'].to(device))
-                send_tensor_with_header(output_tensor.detach(), self.rank + 1, self.pp_group)
-                input_tensor = None # First stage has no input tensor from another stage
-                
-                # Store the model's direct input for the backward pass
-                # This requires saving the original input `batch['image']`
-                # and making it require grad if it's the very first stage
-                # This part of the logic seems missing in the original code but is crucial.
-                # For simplicity, we continue storing `None` as per the original code's structure.
-                
-            else:
-                # THIS IS THE FIX: Receive from the PREVIOUS stage
-                input_tensor = recv_tensor_with_header(self.rank - 1, self.device, self.pp_group, dtype=torch.float32)
-                input_tensor.requires_grad = True # Make sure to set this for the backward pass
-                output_tensor = self.model(input_tensor)
-                
-                if not self.is_last_stage:
-                    # If not the last stage, send to the next one
-                    send_tensor_with_header(output_tensor.detach(), self.rank + 1, self.pp_group)
-
-            input_tensors.append(input_tensor)
-            output_tensors.append(output_tensor)
-
-        # All backward passes (in reverse order)
-        for i in range(len(batches) - 1, -1, -1):
-            batch = batches[i]
-            
-            # Pop the corresponding tensors for this micro-batch
-            input_tensor_for_grad = input_tensors.pop()
-            output_tensor = output_tensors.pop()
-            
-            if self.is_last_stage:
-                # Get target labels based on batch structure
-                target = batch.get("labels", batch.get("label")).to(device, dtype=torch.long)
-                
-                loss = self.criterion(output_tensor, target)
-                logging_loss += loss.item()
-                loss.backward()
-                
-                # Use the correct output tensor for accuracy calculation
-                acc += (output_tensor.argmax(dim=1) == target).float().mean().item()
-                
-                if input_tensor_for_grad is not None:
-                    grad_to_send = input_tensor_for_grad.grad
-                    send_tensor_with_header(grad_to_send, self.rank - 1, self.pp_group)
-            else:
-                # Receive gradient from next stage
-                # The dtype should match the output tensor's dtype
-                grad_buffer = recv_tensor_with_header(self.rank + 1, device, self.pp_group, dtype=output_tensor.dtype)
-                output_tensor.backward(gradient=grad_buffer)
-                
-                if not self.is_first_stage and input_tensor_for_grad is not None:
-                    grad_to_send = input_tensor_for_grad.grad
-                    send_tensor_with_header(grad_to_send, self.rank - 1, self.pp_group)
-
-        # Synchronize gradients across all stages
-        if requires_grad_sync:
-            dist.barrier(group=self.pp_group)
-        
-        # Optimizer step
-        self.optimizer.step()
-        
-        # Calculate average accuracy for the last stage
-        if self.is_last_stage:
-            acc /= len(batches)
-
-        # Return the average loss and accuracy
-        return logging_loss / len(batches), acc if self.is_last_stage else 0.0
-    
-    from collections import deque
-
-    def train_one_forward_one_backward(self, data_loader, pgm, debug_level=2):
-        self.model.train()
-        
-        print(f"\n[TRAIN DEBUG Rank {self.rank}] Starting training with debug_level={debug_level}")
-
-        # Check initial model state
-        if debug_level >= 1:
-            self.debugger.check_gradient_flow(self.model, "Initial State")
-            
-        self.optimizer.zero_grad()
-        
-        # The number of micro-batches to process before starting backward passes
-        # This is also the number of pipeline stages.
-        pipeline_depth = self.world_size 
-        batches = list(data_loader)
-        num_micro_batches = len(batches)
-        
-        # Debug communication pattern
-        debug_communication_pattern(self.rank, self.world_size, num_micro_batches, pipeline_depth)
-        
-        print(f"[TRAIN DEBUG Rank {self.rank}] Processing {num_micro_batches} micro-batches, "
-              f"pipeline_depth={pipeline_depth}")
-        
-        # Queues to hold data for forward and backward passes for each stage
-        fwd_inputs_q = deque()
-        fwd_outputs_q = deque()
-
-        # --- NEW: Accumulators for metrics ---
-        total_loss = 0.0
-        total_correct = 0
-        
-        # Debug: Track tensor flow
-        sent_tensors = []
-        received_tensors = []
-
-        # Main loop processes micro-batches
-        for i in range(num_micro_batches + pipeline_depth - 1):
-            # --- FORWARD PASS ---
-            print(f"\n[STEP DEBUG Rank {self.rank}] === Step {i} ===")
-            is_fwd_step = i < num_micro_batches
-            if is_fwd_step:
-                print(f"[FWD DEBUG Rank {self.rank}] Forward step {i}")
-                if self.is_first_stage:
-                    # First stage gets data from loader
-                    input_tensor = batches[i]['image'].to(self.device)
-                    
-                    if debug_level >= 2:
-                        self.debugger.log_tensor_stats(input_tensor, f"Input_Batch_{i}", "FWD")
-                        # Verify input data consistency
-                        self.debugger.verify_data_sync(input_tensor, f"Input_Batch_{i}", "FWD")
-                    
-                    print(f"[FWD DEBUG Rank {self.rank}] Processing input batch {i}, shape: {input_tensor.shape}")
-
-                    output_tensor = self.model(input_tensor)
-                    if debug_level >= 2:
-                        self.debugger.log_tensor_stats(output_tensor, f"Output_Batch_{i}", "FWD")
-                    
-                    print(f"[FWD DEBUG Rank {self.rank}] Sending tensor to rank {self.rank + 1}")
-                    
-                    send_tensor_with_header(output_tensor.detach(), self.rank + 1, self.pp_group)
-                    sent_tensors.append(output_tensor.detach().clone())
-                    
-                else:
-                    # Intermediate/last stages receive from previous
-                    print(f"[FWD DEBUG Rank {self.rank}] Receiving tensor from rank {self.rank - 1}")
-                    
-                    input_tensor = recv_tensor_with_header(self.rank - 1, self.device, self.pp_group)
-                    received_tensors.append(input_tensor.clone())
-                    
-                    if debug_level >= 2:
-                        self.debugger.log_tensor_stats(input_tensor, f"Received_Batch_{i}", "FWD")
-                    
-                    input_tensor.requires_grad = True
-                    output_tensor = self.model(input_tensor)
-                    
-                    if debug_level >= 2:
-                        self.debugger.log_tensor_stats(output_tensor, f"Output_Batch_{i}", "FWD")
-                    
-                    if not self.is_last_stage:
-                        print(f"[FWD DEBUG Rank {self.rank}] Sending tensor to rank {self.rank + 1}")
-                        send_tensor_with_header(output_tensor.detach(), self.rank + 1, self.pp_group)
-                        sent_tensors.append(output_tensor.detach().clone())
-
-                # Save tensors needed for the corresponding backward pass
-                fwd_inputs_q.append(input_tensor)
-                fwd_outputs_q.append(output_tensor)
-                print(f"[FWD DEBUG Rank {self.rank}] Completed forward step {i}")
-            
-            # --- BACKWARD PASS ---
-            # Start backward passes after the pipeline is full
-            is_bwd_step = i >= pipeline_depth - 1
-            if is_bwd_step:
-                bwd_idx = i - pipeline_depth + 1
-                print(f"[BWD DEBUG Rank {self.rank}] Backward step for micro-batch {bwd_idx}")
-                
-                # Get the tensors from the corresponding forward pass
-                input_tensor_for_grad = fwd_inputs_q.popleft()
-                output_tensor_for_grad = fwd_outputs_q.popleft()
-
-                if debug_level >= 2:
-                    self.debugger.log_tensor_stats(output_tensor_for_grad, f"Output_for_BWD_{bwd_idx}", "BWD")
-                
-                if self.is_last_stage:
-                    # Last stage computes loss and starts backward
-                    batch = batches[bwd_idx]
-                    target = batch['label'].to(self.device, dtype=torch.long)
-
-                    if debug_level >= 2:
-                        self.debugger.log_tensor_stats(target, f"Target_{bwd_idx}", "BWD")
-                        
-                    loss = self.criterion(output_tensor_for_grad, target)
-                    
-                    print(f"[BWD DEBUG Rank {self.rank}] Loss for batch {bwd_idx}: {loss.item():.6f}")
-                    
-                    
-                    # --- NEW: Accumulate loss and accuracy ---
-                    total_loss += loss.item()
-                    predictions = output_tensor_for_grad.argmax(dim=1)
-                    correct = (predictions == target).sum().item()
-                    total_correct += correct
-                    
-                    batch_acc = (correct / target.size(0)) * 100
-                    print(f"[BWD DEBUG Rank {self.rank}] Batch {bwd_idx} accuracy: {batch_acc:.2f}%")
-                    
-                    # We scale the loss by the number of micro-batches to average gradients
-                    # This is important if your loss function is 'sum' instead of 'mean'
-                    scaled_loss = loss / num_micro_batches
-                    print(f"[BWD DEBUG Rank {self.rank}] Starting backward pass")
-                    scaled_loss.backward()
-
-                    if debug_level >= 1:
-                        grad_norm, zero_grads, total_params = self.debugger.check_gradient_flow(
-                            self.model, f"After_BWD_Batch_{bwd_idx}")
-                        if zero_grads > 0:
-                            print(f"[WARNING Rank {self.rank}] {zero_grads}/{total_params} parameters have zero gradients!")
-                    
-                    if input_tensor_for_grad is not None:
-                        # Scale the gradient before sending
-                        grad_to_send = input_tensor_for_grad.grad / num_micro_batches
-                        if debug_level >= 2:
-                            self.debugger.log_tensor_stats(grad_to_send, f"Grad_to_send_{bwd_idx}", "BWD")
-                        
-                        print(f"[BWD DEBUG Rank {self.rank}] Sending gradient to rank {self.rank - 1}")
-                        
-                        send_tensor_with_header(grad_to_send, self.rank - 1, self.pp_group)
-                else:
-                    # Intermediate/first stages receive gradient and propagate
-                    print(f"[BWD DEBUG Rank {self.rank}] Receiving gradient from rank {self.rank + 1}")
-                    
-                    grad_buffer = recv_tensor_with_header(self.rank + 1, self.device, self.pp_group)
-                    
-                    if debug_level >= 2:
-                        self.debugger.log_tensor_stats(grad_buffer, f"Received_grad_{bwd_idx}", "BWD")
-                    
-                    print(f"[BWD DEBUG Rank {self.rank}] Starting backward pass with received gradient")
-                    output_tensor_for_grad.backward(gradient=grad_buffer)
-                    
-                    if debug_level >= 1:
-                        grad_norm, zero_grads, total_params = self.debugger.check_gradient_flow(
-                            self.model, f"After_BWD_Batch_{bwd_idx}")
-                        if zero_grads > 0:
-                            print(f"[WARNING Rank {self.rank}] {zero_grads}/{total_params} parameters have zero gradients!")
-                    
-                    if not self.is_first_stage and input_tensor_for_grad is not None:
-                        grad_to_send = input_tensor_for_grad.grad
-                        
-                        if debug_level >= 2:
-                            self.debugger.log_tensor_stats(grad_to_send, f"Grad_to_send_{bwd_idx}", "BWD")
-                        
-                        print(f"[BWD DEBUG Rank {self.rank}] Sending gradient to rank {self.rank - 1}")
-                        send_tensor_with_header(grad_to_send, self.rank - 1, self.pp_group)
-                
-                print(f"[BWD DEBUG Rank {self.rank}] Completed backward step for micro-batch {bwd_idx}")
-
-        # Final gradient check before optimizer step
-        if debug_level >= 1:
-            print(f"\n[FINAL DEBUG Rank {self.rank}] Pre-optimizer gradient check:")
-            final_grad_norm, zero_grads, total_params = self.debugger.check_gradient_flow(
-                self.model, "Pre_Optimizer_Step")
-            
-            if final_grad_norm < 1e-8:
-                print(f"[ERROR Rank {self.rank}] Total gradient norm is too small: {final_grad_norm}")
-            if zero_grads == total_params:
-                print(f"[ERROR Rank {self.rank}] ALL gradients are zero!")
-        
-        # Optimizer step
-        print(f"[OPT DEBUG Rank {self.rank}] Taking optimizer step")
-        # After the loop, step the optimizer
-        self.optimizer.step()
-
-        # Post-optimizer check
-        if debug_level >= 1:
-            print(f"\n[POST DEBUG Rank {self.rank}] Post-optimizer parameter check:")
-            for name, param in self.model.named_parameters():
-                if param.requires_grad:
-                    param_norm = param.norm().item()
-                    print(f"  {name}: param_norm={param_norm:.8f}")
-        
-        # Calculate final metrics
-        if self.is_last_stage:
-            avg_loss = total_loss / num_micro_batches
-            total_samples = sum(len(b['label']) for b in batches)
-            accuracy = (total_correct / total_samples) * 100
-            
-            print(f"\n[RESULT DEBUG Rank {self.rank}] Final Results:")
-            print(f"  Average Loss: {avg_loss:.6f}")
-            print(f"  Accuracy: {accuracy:.2f}%")
-            print(f"  Total Correct: {total_correct}/{total_samples}")
-            
-            return avg_loss, accuracy
-        else:
-            return 0.0, 0.0
-            
-    def evaluate(self, val_loader):
-        self.model.eval()
-        total_loss = 0.0
-        total_correct = 0
-        total_samples = 0
-        
-        with torch.no_grad():
-            for batch in val_loader:
-                images = batch['image']
-                targets = batch['label']
-
-                if self.is_first_stage:
-                    output = self.model(images.to(self.device))
-                    if not self.is_last_stage:
-                        # MODIFIED: Use the helper for evaluation as well.
-                        send_tensor_with_header(output, self.rank + 1, self.pp_group)
-                else:
-                    # MODIFIED: The helper removes the need for get_input_shape.
-                    buffer = recv_tensor_with_header(self.rank - 1, self.device, self.pp_group, dtype=images.dtype)
-                    output = self.model(buffer)
-                    if not self.is_last_stage:
-                        send_tensor_with_header(output, self.rank + 1, self.pp_group)
-
-                if self.is_last_stage:
-                    targets = targets.to(self.device, dtype=torch.long)
-                    loss = self.criterion(output, targets)
-                    total_loss += loss.item() * output.size(0)
-                    total_correct += (output.argmax(dim=1) == targets).sum().item()
-                    total_samples += output.size(0)
-
-        dist.barrier(group=self.pp_group)
-        
-        if self.is_last_stage:
-            avg_loss = total_loss / total_samples if total_samples > 0 else 0.0
-            accuracy = (total_correct / total_samples * 100) if total_samples > 0 else 0.0
-            return avg_loss, accuracy
-        else:
-            return None, None
-        
-        
