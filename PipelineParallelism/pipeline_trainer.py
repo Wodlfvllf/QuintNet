@@ -430,8 +430,7 @@ class PipelineTrainer:
                     # Receive gradient from next stage
                     print(f"[RANK {self.rank}] BWD step {i}: Receiving grad from rank {self.rank + 1}")
                     grad_buffer = recv_tensor_with_header(self.rank + 1, self.device, self.pp_group)
-                    scaled_grad_buffer = grad_buffer / num_micro_batches
-                    output_tensor_for_grad.backward(gradient=scaled_grad_buffer)
+                    output_tensor_for_grad.backward(gradient=grad_buffer)
                     print(f"[RANK {self.rank}] BWD step {i}: Called backward with received grad.")
                     
                     # Send gradient to previous stage (if not first stage)
