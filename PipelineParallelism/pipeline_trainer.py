@@ -167,6 +167,27 @@ from .operations import Send, Recv
 import torch
 import torch.distributed as dist
 from tqdm import tqdm
+import torch
+import torch.distributed as dist
+import numpy as np
+from collections import defaultdict
+import time
+
+class PipelineDebugger:
+    """Comprehensive debugging utility for pipeline parallelism"""
+    
+    def __init__(self, rank, pp_group, world_size):
+        self.rank = rank
+        self.pp_group = pp_group
+        self.world_size = world_size
+        self.is_first_stage = (rank == 0)
+        self.is_last_stage = (rank == world_size - 1)
+        
+        # Debug counters and accumulators
+        self.forward_count = 0
+        self.backward_count = 0
+        self.tensor_stats = defaultdict(list)
+        
 def send_tensor_with_header(tensor: torch.Tensor, dst: int, group=None):
     """Sends a tensor preceded by a header containing its shape and dtype info."""
     # 1. Send the number of dimensions
