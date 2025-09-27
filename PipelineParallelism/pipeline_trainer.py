@@ -633,14 +633,40 @@ class PipelineTrainer:
                     if input_tensor_for_grad is not None:
                         # Scale the gradient before sending
                         grad_to_send = input_tensor_for_grad.grad / num_micro_batches
+                        if debug_level >= 2:
+                            self.debugger.log_tensor_stats(grad_to_send, f"Grad_to_send_{bwd_idx}", "BWD")
+                        
+                        print(f"[BWD DEBUG Rank {self.rank}] Sending gradient to rank {self.rank - 1}")
+                        
                         send_tensor_with_header(grad_to_send, self.rank - 1, self.pp_group)
                 else:
+                    # Intermediate/first stages receive gradient and propagate
+                    print(f"[BWD DEBUG Rank {self.rank}] Receiving gradient from rank {self.rank + 1}")
+                    
                     grad_buffer = recv_tensor_with_header(self.rank + 1, self.device, self.pp_group)
+                    
+                    if debug_level >= 2:
+                        self.debugger.log_tensor_stats(grad_buffer, f"Received_grad_{bwd_idx}", "BWD")
+                    
+                    print(f"[BWD DEBUG Rank {self.rank}] Starting backward pass with received gradient")
                     output_tensor_for_grad.backward(gradient=grad_buffer)
                     
+                    if debug_level >= 1:
+                        grad_norm, zero_grads, total_params = self.debugger.check_gradient_flow(
+                            self.model, f"After_BWD_Batch_{bwd_idx}")
+                        if zero_grads > 0:
+                            print(f"[WARNING Rank {self.rank}] {zero_grads}/{total_params} parameters have zero gradients!")
+                    
                     if not self.is_first_stage and input_tensor_for_grad is not None:
-                        # Note: grad is already scaled from the previous stage
-                        send_tensor_with_header(input_tensor_for_grad.grad, self.rank - 1, self.pp_group)
+                        grad_to_send = input_tensor_for_grad.grad
+                        
+                        if debug_level >= 2:
+                            self.debugger.log_tensor_stats(grad_to_send, f"Grad_to_send_{bwd_idx}", "BWD")
+                        
+                        print(f"[BWD DEBUG Rank {self.rank}] Sending gradient to rank {self.rank - 1}")
+                        send_tensor_with_header(grad_to_send, self.rank - 1, self.pp_group)
+                
+                print(f"[BWD DEBUG Rank {self.rank}] Completed backward step for micro-batch {bwd_idx}")
 
         # After the loop, step the optimizer
         self.optimizer.step()
