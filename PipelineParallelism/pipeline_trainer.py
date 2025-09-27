@@ -188,6 +188,23 @@ class PipelineDebugger:
         self.backward_count = 0
         self.tensor_stats = defaultdict(list)
         
+        def log_tensor_stats(self, tensor, name, step=""):
+        """Log comprehensive tensor statistics"""
+        if tensor is None:
+            print(f"[DEBUG Rank {self.rank}] {step} {name}: NONE")
+            return
+            
+        stats = {
+            'mean': tensor.mean().item(),
+            'std': tensor.std().item(),
+            'min': tensor.min().item(),
+            'max': tensor.max().item(),
+            'norm': tensor.norm().item(),
+            'shape': list(tensor.shape),
+            'requires_grad': tensor.requires_grad,
+            'has_grad': tensor.grad is not None if tensor.requires_grad else False
+        }
+        
 def send_tensor_with_header(tensor: torch.Tensor, dst: int, group=None):
     """Sends a tensor preceded by a header containing its shape and dtype info."""
     # 1. Send the number of dimensions
