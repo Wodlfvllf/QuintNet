@@ -524,6 +524,10 @@ class PipelineTrainer:
         # --- NEW: Accumulators for metrics ---
         total_loss = 0.0
         total_correct = 0
+        
+        # Debug: Track tensor flow
+        sent_tensors = []
+        received_tensors = []
 
         # Main loop processes micro-batches
         for i in range(num_micro_batches + pipeline_depth - 1):
@@ -544,13 +548,34 @@ class PipelineTrainer:
                     print(f"[FWD DEBUG Rank {self.rank}] Processing input batch {i}, shape: {input_tensor.shape}")
 
                     output_tensor = self.model(input_tensor)
+                    if debug_level >= 2:
+                        self.debugger.log_tensor_stats(output_tensor, f"Output_Batch_{i}", "FWD")
+                    
+                    print(f"[FWD DEBUG Rank {self.rank}] Sending tensor to rank {self.rank + 1}")
+                    
                     send_tensor_with_header(output_tensor.detach(), self.rank + 1, self.pp_group)
+                    sent_tensors.append(output_tensor.detach().clone())
+                    
                 else:
+                    # Intermediate/last stages receive from previous
+                    print(f"[FWD DEBUG Rank {self.rank}] Receiving tensor from rank {self.rank - 1}")
+                    
                     input_tensor = recv_tensor_with_header(self.rank - 1, self.device, self.pp_group)
+                    received_tensors.append(input_tensor.clone())
+                    
+                    if debug_level >= 2:
+                        self.debugger.log_tensor_stats(input_tensor, f"Received_Batch_{i}", "FWD")
+                    
                     input_tensor.requires_grad = True
                     output_tensor = self.model(input_tensor)
+                    
+                    if debug_level >= 2:
+                        self.debugger.log_tensor_stats(output_tensor, f"Output_Batch_{i}", "FWD")
+                    
                     if not self.is_last_stage:
+                        print(f"[FWD DEBUG Rank {self.rank}] Sending tensor to rank {self.rank + 1}")
                         send_tensor_with_header(output_tensor.detach(), self.rank + 1, self.pp_group)
+                        sent_tensors.append(output_tensor.detach().clone())
 
                 # Save tensors needed for the corresponding backward pass
                 fwd_inputs_q.append(input_tensor)
