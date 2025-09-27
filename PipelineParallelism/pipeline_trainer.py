@@ -45,7 +45,7 @@ import torch.nn as nn
 from collections import deque
 
 class PipelineTrainer:
-    def __init__(self, model, pp_group, criterion, device):
+    def __init__(self, model, pp_group, criterion, device, optimizer=None):
         """
         Initializes the trainer for pipeline parallelism.
         
@@ -58,7 +58,10 @@ class PipelineTrainer:
         """
         self.model = model
         self.pp_group = pp_group
-        self.optimizer = torch.optim.Adam(self.model.parameters(), lr=0.001)
+        if optimizer is None:
+            self.optimizer = torch.optim.Adam(self.model.parameters(), lr=0.001)
+        else:
+            self.optimizer = optimizer
         self.criterion = criterion
         self.device = device
         
@@ -333,8 +336,6 @@ class PipelineTrainer:
         # Return the average loss and accuracy
         return logging_loss, acc
 
-    from collections import deque
-    
     def train_one_forward_one_backward(self, data_loader, pgm, epoch):
         self.model.train()
         self.optimizer.zero_grad()
@@ -366,15 +367,22 @@ class PipelineTrainer:
                     # FIXED: First stage gets data from loader and needs requires_grad
                     input_tensor = batches[i]['image'].to(self.device)
                     input_tensor.requires_grad = True  # Critical fix!
+                    print(f"[RANK {self.rank}] FWD step {i}: Created input_tensor with shape {input_tensor.shape}")
                     output_tensor = self.model(input_tensor)
+                    print(f"[RANK {self.rank}] FWD step {i}: Produced output_tensor with shape {output_tensor.shape}")
                     
                     if not self.is_last_stage:  # Only send if not last stage
+                        print(f"[RANK {self.rank}] FWD step {i}: Sending output_tensor to rank {self.rank + 1}")
                         send_tensor_with_header(output_tensor.detach(), self.rank + 1, self.pp_group)
                 else:
+                    print(f"[RANK {self.rank}] FWD step {i}: Receiving input_tensor from rank {self.rank - 1}")
                     input_tensor = recv_tensor_with_header(self.rank - 1, self.device, self.pp_group)
                     input_tensor.requires_grad = True
+                    print(f"[RANK {self.rank}] FWD step {i}: Received input_tensor with shape {input_tensor.shape}")
                     output_tensor = self.model(input_tensor)
+                    print(f"[RANK {self.rank}] FWD step {i}: Produced output_tensor with shape {output_tensor.shape}")
                     if not self.is_last_stage:
+                        print(f"[RANK {self.rank}] FWD step {i}: Sending output_tensor to rank {self.rank + 1}")
                         send_tensor_with_header(output_tensor.detach(), self.rank + 1, self.pp_group)
 
                 # Save tensors needed for the corresponding backward pass
@@ -388,12 +396,14 @@ class PipelineTrainer:
                 # Get the tensors from the corresponding forward pass (FIFO order)
                 input_tensor_for_grad = fwd_inputs_q.popleft()
                 output_tensor_for_grad = fwd_outputs_q.popleft()
+                print(f"[RANK {self.rank}] BWD step {i}: Popped tensors for grad. Input shape: {input_tensor_for_grad.shape}, Output shape: {output_tensor_for_grad.shape}")
 
                 if self.is_last_stage:
                     # FIXED: Correct batch indexing for corresponding forward pass
                     batch_idx = i - pipeline_depth + 1
                     target = batches[batch_idx]['label'].to(self.device, dtype=torch.long)
                     loss = self.criterion(output_tensor_for_grad, target)
+                    print(f"[RANK {self.rank}] BWD step {i}: Calculated loss: {loss.item()}")
                     
                     # Accumulate loss and accuracy
                     total_loss += loss.item()
@@ -402,30 +412,36 @@ class PipelineTrainer:
                     # FIXED: Scale loss properly for gradient averaging
                     scaled_loss = loss / num_micro_batches
                     scaled_loss.backward()
+                    print(f"[RANK {self.rank}] BWD step {i}: Called backward on scaled loss.")
 
                     if  input_tensor_for_grad is None:
                         print("input has no grad")
                     # Send gradient to previous stage (if not first stage overall)
                     if not self.is_first_stage and input_tensor_for_grad is not None:
                         if input_tensor_for_grad.grad is not None:
+                            print(f"[RANK {self.rank}] BWD step {i}: Sending grad of shape {input_tensor_for_grad.grad.shape} to rank {self.rank - 1}")
                             send_tensor_with_header(input_tensor_for_grad.grad, self.rank - 1, self.pp_group)
                         else:
                             # Handle case where gradient is None
+                            print(f"[RANK {self.rank}] BWD step {i}: Gradient is None, sending zero grad to rank {self.rank - 1}")
                             zero_grad = torch.zeros_like(input_tensor_for_grad)
                             send_tensor_with_header(zero_grad, self.rank - 1, self.pp_group)
                 else:
                     # Receive gradient from next stage
+                    print(f"[RANK {self.rank}] BWD step {i}: Receiving grad from rank {self.rank + 1}")
                     grad_buffer = recv_tensor_with_header(self.rank + 1, self.device, self.pp_group)
-                    
-                    # FIXED: Don't scale again - gradient is already scaled from last stage
-                    output_tensor_for_grad.backward(gradient=grad_buffer)
+                    scaled_grad_buffer = grad_buffer / num_micro_batches
+                    output_tensor_for_grad.backward(gradient=scaled_grad_buffer)
+                    print(f"[RANK {self.rank}] BWD step {i}: Called backward with received grad.")
                     
                     # Send gradient to previous stage (if not first stage)
                     if not self.is_first_stage and input_tensor_for_grad is not None:
                         if input_tensor_for_grad.grad is not None:
+                            print(f"[RANK {self.rank}] BWD step {i}: Sending grad of shape {input_tensor_for_grad.grad.shape} to rank {self.rank - 1}")
                             send_tensor_with_header(input_tensor_for_grad.grad, self.rank - 1, self.pp_group)
                         else:
                             # Handle case where gradient is None
+                            print(f"[RANK {self.rank}] BWD step {i}: Gradient is None, sending zero grad to rank {self.rank - 1}")
                             zero_grad = torch.zeros_like(input_tensor_for_grad)
                             send_tensor_with_header(zero_grad, self.rank - 1, self.pp_group)
 
@@ -434,6 +450,7 @@ class PipelineTrainer:
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.max_grad_norm)
 
         # After the loop, step the optimizer
+        print(f"[RANK {self.rank}] Stepping optimizer.")
         self.optimizer.step()
         self.print_layer_debug_norms(self.model, self.rank, f"Epoch {epoch+1} End")  # Fixed label
         
