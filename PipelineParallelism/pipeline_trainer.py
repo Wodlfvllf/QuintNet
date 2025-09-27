@@ -256,6 +256,37 @@ class PipelineDebugger:
         print(f"  Total gradient norm: {total_grad_norm:.8f}")
         
         return total_grad_norm, zero_grad_layers, layer_count
+    
+    def verify_data_sync(self, data, name, step=""):
+        """Verify data synchronization across ranks"""
+        if data is None:
+            print(f"[SYNC DEBUG] {step} {name}: Data is None on rank {self.rank}")
+            return
+            
+        # Compute local checksum
+        local_sum = data.sum().item()
+        local_mean = data.mean().item()
+        
+        # Gather from all ranks
+        gathered_sums = [None] * self.world_size
+        gathered_means = [None] * self.world_size
+        
+        dist.all_gather_object(gathered_sums, local_sum, group=self.pp_group)
+        dist.all_gather_object(gathered_means, local_mean, group=self.pp_group)
+        
+        if self.rank == 0:
+            print(f"[SYNC DEBUG] {step} {name} - Sums across ranks: {gathered_sums}")
+            print(f"[SYNC DEBUG] {step} {name} - Means across ranks: {gathered_means}")
+            
+            # Check consistency
+            sum_diff = max(gathered_sums) - min(gathered_sums)
+            mean_diff = max(gathered_means) - min(gathered_means)
+            
+            if sum_diff < 1e-6:
+                print(f"[SYNC DEBUG] ✓ {name} is synchronized across ranks")
+            else:
+                print(f"[SYNC DEBUG] ✗ {name} differs across ranks! Sum diff: {sum_diff}")
+
 def send_tensor_with_header(tensor: torch.Tensor, dst: int, group=None):
     """Sends a tensor preceded by a header containing its shape and dtype info."""
     # 1. Send the number of dimensions
