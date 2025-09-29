@@ -35,4 +35,20 @@ class PipelineParallelWrapper(nn.Module):
         print(f"Rank {self.rank}: Initialized stage {self.stage_idx}/{self.num_stages-1}")
         self._print_stage_info()
 
+    def _get_model_type(self, model):
+        """Detect the type of model for intelligent splitting"""
+        # Check if it's a Vision Transformer
+        has_embedding = hasattr(model, 'embedding')
+        has_blocks = hasattr(model, 'blocks')
+        has_classification_head = hasattr(model, 'classification_head')
+        
+        if has_embedding and has_blocks and has_classification_head:
+            return 'vit'
+        
+        # Check if it's a standard transformer
+        if has_blocks:
+            return 'transformer'
+        
+        # Default to generic
+        return 'generic'
     
