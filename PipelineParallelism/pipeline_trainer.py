@@ -69,25 +69,29 @@ import torch.nn as nn
 from collections import deque
 
 class PipelineTrainer:
-    def __init__(self, model, pp_group, criterion, device, optimizer=None):
+    def __init__(self, model, pp_group, criterion, device, optimizer=None, max_grad_norm=1.0):
         """
         Initializes the trainer for pipeline parallelism.
         
         Args:
             model: The model, already wrapped in PipelineParallelWrapper.
             pp_group: The process group for the pipeline.
-            optimizer: A pre-configured optimizer for the local model parameters.
             criterion: The loss function.
             device: The device for the current rank.
+            optimizer: Optional pre-configured optimizer for the local model parameters.
+            max_grad_norm: Maximum gradient norm for clipping (default: 1.0)
         """
         self.model = model
         self.pp_group = pp_group
+        self.criterion = criterion
+        self.device = device
+        self.max_grad_norm = max_grad_norm
+        
+        # Initialize optimizer if not provided
         if optimizer is None:
             self.optimizer = torch.optim.Adam(self.model.parameters(), lr=0.001)
         else:
             self.optimizer = optimizer
-        self.criterion = criterion
-        self.device = device
         
         # Get rank and size from the specific pipeline group
         self.rank = dist.get_rank(group=pp_group)
@@ -97,12 +101,9 @@ class PipelineTrainer:
         self.is_first_stage = (self.rank == 0)
         self.is_last_stage = (self.rank == self.world_size - 1)
         
-        # Buffers to store the tensors that cross the process boundary.
-        # These are crucial for manually connecting the backward pass.
-        self.input_tensor_for_stage = None
-        self.output_tensor_of_stage = None
-        
-        print(f"PipelineTrainer initialized - Rank: {self.rank}, Stage: {self.rank}")
+        print(f"PipelineTrainer initialized - Rank: {self.rank}, Stage: {self.rank}/{self.world_size-1}")
+        print(f"  First stage: {self.is_first_stage}, Last stage: {self.is_last_stage}")
+        print(f"  Device: {device}, Max grad norm: {max_grad_norm}")
 
     def train_step_naive(self, input_data, target):
         self.model.train()
