@@ -87,3 +87,22 @@ class PipelineParallelWrapper(nn.Module):
                 modules = list(model.blocks[half_blocks:])
                 modules.append(model.classification_head)
                 return nn.Sequential(*modules)
+            
+        elif self.num_stages == 3:
+            if self.stage_idx == 0:
+                # First stage: embedding + first third of blocks
+                modules = [model.embedding]
+                first_third = num_blocks // 3
+                modules.extend(model.blocks[:first_third])
+                return nn.Sequential(*modules)
+            elif self.stage_idx == 1:
+                # Middle stage: middle blocks
+                first_third = num_blocks // 3
+                second_third = 2 * num_blocks // 3
+                return nn.Sequential(*model.blocks[first_third:second_third])
+            else:
+                # Last stage: last blocks + classification head
+                second_third = 2 * num_blocks // 3
+                modules = list(model.blocks[second_third:])
+                modules.append(model.classification_head)
+                return nn.Sequential(*modules)
