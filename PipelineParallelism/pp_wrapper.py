@@ -52,3 +52,14 @@ class PipelineParallelWrapper(nn.Module):
         # Default to generic
         return 'generic'
     
+    def _intelligent_split(self, model):
+        """Intelligently split model based on its architecture"""
+        model_type = self._get_model_type(model)
+        
+        if model_type == 'vit':
+            return self._split_vit_model(model)
+        elif model_type == 'transformer':
+            return self._split_transformer_model(model)
+        else:
+            return self._generic_split(model)
+    
