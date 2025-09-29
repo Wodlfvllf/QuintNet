@@ -170,3 +170,21 @@ class PipelineParallelWrapper(nn.Module):
                 return model
             else:
                 return nn.Identity()
+            
+        # Distribute children across stages
+        num_children = len(children)
+        children_per_stage = num_children // self.num_stages
+        remainder = num_children % self.num_stages
+        
+        start_idx = self.stage_idx * children_per_stage + min(self.stage_idx, remainder)
+        stage_size = children_per_stage + (1 if self.stage_idx < remainder else 0)
+        end_idx = start_idx + stage_size
+        
+        stage_children = children[start_idx:end_idx]
+        
+        if len(stage_children) == 0:
+            return nn.Identity()
+        elif len(stage_children) == 1:
+            return stage_children[0]
+        else:
+            return nn.Sequential(*stage_children)
