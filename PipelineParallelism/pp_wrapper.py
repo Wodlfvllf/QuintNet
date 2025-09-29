@@ -158,3 +158,15 @@ class PipelineParallelWrapper(nn.Module):
             return stage_modules[0]
         else:
             return nn.Sequential(*stage_modules)
+        
+    def _generic_split(self, model):
+        """Generic split for unknown model types - preserves module boundaries"""
+        # Get top-level children modules
+        children = list(model.children())
+        
+        if len(children) == 0:
+            # If no children, return the model itself to one stage
+            if self.stage_idx == 0:
+                return model
+            else:
+                return nn.Identity()
