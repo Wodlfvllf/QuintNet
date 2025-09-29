@@ -233,3 +233,23 @@ class PipelineParallelWrapper(nn.Module):
     def named_parameters(self):
         """Return named parameters of local module"""
         return self.local_module.named_parameters()
+    
+    def train(self, mode=True):
+        """Set training mode"""
+        super().train(mode)
+        self.local_module.train(mode)
+        return self
+    
+    def eval(self):
+        """Set evaluation mode"""
+        super().eval()
+        self.local_module.eval()
+        return self
+    
+    def state_dict(self):
+        """Return state dict of local module"""
+        return self.local_module.state_dict()
+    
+    def load_state_dict(self, state_dict):
+        """Load state dict to local module"""
+        return self.local_module.load_state_dict(state_dict)
