@@ -138,3 +138,23 @@ class PipelineParallelWrapper(nn.Module):
                     return stage_blocks[0]
                 else:
                     return nn.Sequential(*stage_blocks)
+                
+    def _split_transformer_model(self, model):
+        """Split a transformer model with blocks"""
+        if not hasattr(model, 'blocks'):
+            return self._generic_split(model)
+        
+        num_blocks = len(model.blocks)
+        blocks_per_stage = num_blocks // self.num_stages
+        remainder = num_blocks % self.num_stages
+        
+        start_idx = self.stage_idx * blocks_per_stage + min(self.stage_idx, remainder)
+        stage_size = blocks_per_stage + (1 if self.stage_idx < remainder else 0)
+        end_idx = start_idx + stage_size
+        
+        stage_modules = model.blocks[start_idx:end_idx]
+        
+        if len(stage_modules) == 1:
+            return stage_modules[0]
+        else:
+            return nn.Sequential(*stage_modules)
