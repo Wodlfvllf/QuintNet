@@ -221,3 +221,15 @@ class PipelineParallelWrapper(nn.Module):
         num_params = sum(p.numel() for p in self.local_module.parameters())
         print(f"Total parameters in stage: {num_params:,}")
         print("=" * 40)
+        
+    def forward(self, x):
+        """Forward pass through local stage"""
+        return self.local_module(x)
+    
+    def parameters(self):
+        """Return parameters of local module"""
+        return self.local_module.parameters()
+    
+    def named_parameters(self):
+        """Return named parameters of local module"""
+        return self.local_module.named_parameters()
