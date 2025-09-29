@@ -106,3 +106,35 @@ class PipelineParallelWrapper(nn.Module):
                 modules = list(model.blocks[second_third:])
                 modules.append(model.classification_head)
                 return nn.Sequential(*modules)
+
+        else:
+            # For 4 or more stages, distribute transformer blocks evenly
+            # Stage 0: embedding
+            # Stage 1 to N-2: transformer blocks
+            # Stage N-1: classification head
+            
+            if self.stage_idx == 0:
+                # First stage: only embedding
+                return model.embedding
+            elif self.stage_idx == self.num_stages - 1:
+                # Last stage: only classification head
+                return model.classification_head
+            else:
+                # Middle stages: distribute transformer blocks
+                blocks_per_stage = num_blocks // (self.num_stages - 2)
+                remainder = num_blocks % (self.num_stages - 2)
+                
+                # Calculate which blocks belong to this stage
+                stage_in_blocks = self.stage_idx - 1  # Adjusted index for block stages
+                start_idx = stage_in_blocks * blocks_per_stage + min(stage_in_blocks, remainder)
+                end_idx = start_idx + blocks_per_stage + (1 if stage_in_blocks < remainder else 0)
+                
+                if start_idx >= num_blocks:
+                    # If no blocks assigned, create identity
+                    return nn.Identity()
+                
+                stage_blocks = model.blocks[start_idx:end_idx]
+                if len(stage_blocks) == 1:
+                    return stage_blocks[0]
+                else:
+                    return nn.Sequential(*stage_blocks)
