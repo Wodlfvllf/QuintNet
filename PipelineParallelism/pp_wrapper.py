@@ -204,3 +204,20 @@ class PipelineParallelWrapper(nn.Module):
         # Create stages based on split points
         # Implementation would depend on specific requirements
         raise NotImplementedError("Manual split points not yet implemented")
+    
+    def _print_stage_info(self):
+        """Print information about what this stage contains"""
+        print(f"\n=== Stage {self.stage_idx} Info ===")
+        print(f"Stage type: {type(self.local_module).__name__}")
+        
+        if isinstance(self.local_module, nn.Sequential):
+            print(f"Contains {len(self.local_module)} sequential modules:")
+            for i, module in enumerate(self.local_module):
+                print(f"  [{i}] {type(module).__name__}")
+        else:
+            print(f"Single module: {type(self.local_module).__name__}")
+        
+        # Count parameters
+        num_params = sum(p.numel() for p in self.local_module.parameters())
+        print(f"Total parameters in stage: {num_params:,}")
+        print("=" * 40)
