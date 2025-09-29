@@ -106,52 +106,66 @@ class PipelineTrainer:
         print(f"  Device: {device}, Max grad norm: {max_grad_norm}")
 
     def train_step_naive(self, input_data, target):
+        """
+        Simple training step - one forward, one backward, one update.
+        Good for debugging but not efficient.
+        """
         self.model.train()
         self.optimizer.zero_grad()
 
-        # --- 1. FORWARD PASS CHAIN ---
+        input_tensor_for_stage = None
+        output_tensor_of_stage = None
+
+        # --- FORWARD PASS ---
         if self.is_first_stage:
-            self.output_tensor_of_stage = self.model(input_data.to(self.device))
-            # MODIFIED: Use the helper to send the tensor and its metadata.
-            send_tensor_with_header(self.output_tensor_of_stage.detach(), self.rank + 1, self.pp_group)
-        
-        else: # For last and intermediate stages
-            # MODIFIED: Use the helper to receive. It discovers the shape automatically.
-            buffer = recv_tensor_with_header(self.rank - 1, self.device, self.pp_group, dtype=input_data.dtype)
-            
-            self.input_tensor_for_stage = buffer
-            self.input_tensor_for_stage.requires_grad = True
-            
-            self.output_tensor_of_stage = self.model(self.input_tensor_for_stage)
+            input_data = input_data.to(self.device)
+            output_tensor_of_stage = self.model(input_data)
             
             if not self.is_last_stage:
-                send_tensor_with_header(self.output_tensor_of_stage.detach(), self.rank + 1, self.pp_group)
+                send_tensor_with_header(output_tensor_of_stage.detach(), self.rank + 1, self.pp_group)
+        else:
+            # Receive from previous stage
+            input_tensor_for_stage = recv_tensor_with_header(
+                self.rank - 1, self.device, self.pp_group, dtype=input_data.dtype
+            )
+            input_tensor_for_stage.requires_grad = True
+            
+            output_tensor_of_stage = self.model(input_tensor_for_stage)
+            
+            if not self.is_last_stage:
+                send_tensor_with_header(output_tensor_of_stage.detach(), self.rank + 1, self.pp_group)
 
-        # --- 2. BACKWARD PASS CHAIN (in reverse) ---
+        # --- BACKWARD PASS ---
         if self.is_last_stage:
-            loss = self.criterion(self.output_tensor_of_stage, target.to(device=self.device, dtype=torch.long))
+            target = target.to(device=self.device, dtype=torch.long)
+            loss = self.criterion(output_tensor_of_stage, target)
             loss.backward()
             
-            # MODIFIED: Use the helper to send the gradient and its metadata.
-            grad_to_send = self.input_tensor_for_stage.grad
-            send_tensor_with_header(grad_to_send, self.rank - 1, self.pp_group)
+            if not self.is_first_stage and input_tensor_for_stage is not None:
+                grad_to_send = input_tensor_for_stage.grad
+                send_tensor_with_header(grad_to_send, self.rank - 1, self.pp_group)
+        else:
+            # Receive gradient from next stage
+            grad_buffer = recv_tensor_with_header(
+                self.rank + 1, self.device, self.pp_group, dtype=output_tensor_of_stage.dtype
+            )
             
-        else: # For first and intermediate stages
-            # MODIFIED: Use the helper to receive the gradient.
-            # We know the gradient will have the same shape and dtype as our stage's output.
-            grad_buffer = recv_tensor_with_header(self.rank + 1, self.device, self.pp_group, dtype=self.output_tensor_of_stage.dtype)
+            output_tensor_of_stage.backward(gradient=grad_buffer)
             
-            self.output_tensor_of_stage.backward(gradient=grad_buffer)
-            
-            if not self.is_first_stage:
-                grad_to_send = self.input_tensor_for_stage.grad
+            if not self.is_first_stage and input_tensor_for_stage is not None:
+                grad_to_send = input_tensor_for_stage.grad
                 send_tensor_with_header(grad_to_send, self.rank - 1, self.pp_group)
         
-        # --- 3. OPTIMIZER STEP ---
+        # --- OPTIMIZER STEP ---
+        if self.max_grad_norm > 0:
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.max_grad_norm)
+        
         self.optimizer.step()
         
+        # Return loss and accuracy for last stage
         if self.is_last_stage:
-            acc = (self.output_tensor_of_stage.argmax(dim=1) == target.to(self.device)).float().mean().item()
+            with torch.no_grad():
+                acc = (output_tensor_of_stage.argmax(dim=1) == target).float().mean().item()
             return loss.item(), acc * 100
         else:
             return None, None
