@@ -393,6 +393,7 @@ class PipelineTrainer:
                     scaled_loss = loss / num_micro_batches
                     scaled_loss.backward()
 
+                    # Send gradient to previous stage (if not first stage overall)
                     if not self.is_first_stage and input_tensor_for_grad is not None:
                         if input_tensor_for_grad.grad is not None:
                             send_tensor_with_header(input_tensor_for_grad.grad, self.rank - 1, self.pp_group)
