@@ -63,3 +63,27 @@ class PipelineParallelWrapper(nn.Module):
         else:
             return self._generic_split(model)
     
+    def _split_vit_model(self, model):
+        """Split Vision Transformer model intelligently"""
+        # Vision Transformer has: embedding, transformer blocks, classification head
+        
+        # Count total components
+        num_blocks = len(model.blocks) if hasattr(model, 'blocks') else 0
+        total_components = 1 + num_blocks + 1  # embedding + blocks + head
+        
+        if self.num_stages == 1:
+            return model
+        
+        if self.num_stages == 2:
+            if self.stage_idx == 0:
+                # First stage: embedding + half of transformer blocks
+                modules = [model.embedding]
+                half_blocks = num_blocks // 2
+                modules.extend(model.blocks[:half_blocks])
+                return nn.Sequential(*modules)
+            else:
+                # Second stage: rest of blocks + classification head
+                half_blocks = num_blocks // 2
+                modules = list(model.blocks[half_blocks:])
+                modules.append(model.classification_head)
+                return nn.Sequential(*modules)
