@@ -188,3 +188,19 @@ class PipelineParallelWrapper(nn.Module):
             return stage_children[0]
         else:
             return nn.Sequential(*stage_children)
+        
+    def _split_at_points(self, model, split_points: List[str]):
+        """Split model at specific named module boundaries"""
+        # This method allows manual specification of split points
+        # Useful for complex models where automatic splitting fails
+        
+        named_modules = dict(model.named_modules())
+        
+        # Verify split points exist
+        for point in split_points:
+            if point not in named_modules:
+                raise ValueError(f"Split point '{point}' not found in model")
+        
+        # Create stages based on split points
+        # Implementation would depend on specific requirements
+        raise NotImplementedError("Manual split points not yet implemented")
