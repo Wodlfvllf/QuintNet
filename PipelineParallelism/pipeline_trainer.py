@@ -304,96 +304,134 @@ class PipelineTrainer:
         else:
             return 0.0, 0.0
 
-    def train_one_forward_one_backward(self, data_loader, pgm, epoch):
+    def train_1f1b(self, data_loader, epoch):
+        """
+        1F1B (One Forward One Backward) schedule for pipeline parallelism.
+        Balances memory usage and efficiency.
+        """
         self.model.train()
         self.optimizer.zero_grad()
         
-        pipeline_depth = self.world_size 
+        pipeline_depth = self.world_size
         
         batches = list(data_loader)
         num_micro_batches = len(batches)
         
+        # Queues for storing activations
         fwd_inputs_q = deque()
         fwd_outputs_q = deque()
-
+        
         total_loss = 0.0
         total_correct = 0
+        total_samples = 0
         
-        self.print_layer_debug_norms(self.model, self.rank, f"Epoch {epoch+1} Start")
-
-        # Main loop processes micro-batches
-        for i in tqdm(range(num_micro_batches + pipeline_depth - 1)):
+        # Main pipeline loop
+        total_steps = num_micro_batches + pipeline_depth - 1
+        
+        for step in tqdm(range(total_steps), desc=f"1F1B (Rank {self.rank})", disable=(self.rank != 0)):
             
-            # --- FORWARD PASS ---
-            is_fwd_step = i < num_micro_batches
+            # --- FORWARD PASS (if we have batches left) ---
+            is_fwd_step = step < num_micro_batches
+            
             if is_fwd_step:
+                batch = batches[step]
+                
                 if self.is_first_stage:
-                    input_tensor = batches[i]['image'].to(self.device)
-                    # input_tensor.requires_grad = True # Not needed for first stage
+                    # Get input data
+                    if 'image' in batch:
+                        input_tensor = batch['image'].to(self.device)
+                    elif 'images' in batch:
+                        input_tensor = batch['images'].to(self.device)
+                    else:
+                        raise KeyError("No 'image' or 'images' key in batch")
+                    
                     output_tensor = self.model(input_tensor)
                     
                     if not self.is_last_stage:
                         send_tensor_with_header(output_tensor.detach(), self.rank + 1, self.pp_group)
+                    
+                    # Store None for first stage (no input gradient needed)
+                    fwd_inputs_q.append(None)
                 else:
-                    input_tensor = recv_tensor_with_header(self.rank - 1, self.device, self.pp_group)
+                    # Receive from previous stage
+                    input_tensor = recv_tensor_with_header(
+                        self.rank - 1, self.device, self.pp_group, dtype=torch.float32
+                    )
                     input_tensor.requires_grad = True
+                    
                     output_tensor = self.model(input_tensor)
+                    
                     if not self.is_last_stage:
                         send_tensor_with_header(output_tensor.detach(), self.rank + 1, self.pp_group)
-
-                fwd_inputs_q.append(input_tensor)
+                    
+                    fwd_inputs_q.append(input_tensor)
+                
                 fwd_outputs_q.append(output_tensor)
             
-            # --- BACKWARD PASS ---
-            is_bwd_step = i >= pipeline_depth - 1
-            if is_bwd_step:
+            # --- BACKWARD PASS (after pipeline is filled) ---
+            is_bwd_step = step >= (pipeline_depth - 1)
+            
+            if is_bwd_step and len(fwd_outputs_q) > 0:
+                # Get the oldest forward pass tensors
                 input_tensor_for_grad = fwd_inputs_q.popleft()
                 output_tensor_for_grad = fwd_outputs_q.popleft()
-
+                
+                # Get the corresponding batch
+                batch_idx = step - pipeline_depth + 1
+                batch = batches[batch_idx]
+                
                 if self.is_last_stage:
-                    batch_idx = i - pipeline_depth + 1
-                    target = batches[batch_idx]['label'].to(self.device, dtype=torch.long)
+                    # Get target
+                    if 'labels' in batch:
+                        target = batch['labels'].to(self.device, dtype=torch.long)
+                    elif 'label' in batch:
+                        target = batch['label'].to(self.device, dtype=torch.long)
+                    else:
+                        raise KeyError("No 'labels' or 'label' key in batch")
+                    
+                    # Calculate loss
                     loss = self.criterion(output_tensor_for_grad, target)
-                    
                     total_loss += loss.item()
-                    total_correct += (output_tensor_for_grad.argmax(dim=1) == target).sum().item()
                     
+                    # Calculate accuracy
+                    with torch.no_grad():
+                        total_correct += (output_tensor_for_grad.argmax(dim=1) == target).sum().item()
+                        total_samples += target.size(0)
+                    
+                    # Scale loss for gradient accumulation
                     scaled_loss = loss / num_micro_batches
                     scaled_loss.backward()
-
-                    # Send gradient to previous stage (if not first stage overall)
-                    if not self.is_first_stage and input_tensor_for_grad is not None:
-                        if input_tensor_for_grad.grad is not None:
-                            send_tensor_with_header(input_tensor_for_grad.grad, self.rank - 1, self.pp_group)
-                        else:
-                            zero_grad = torch.zeros_like(input_tensor_for_grad)
-                            send_tensor_with_header(zero_grad, self.rank - 1, self.pp_group)
-                else:
-                    grad_buffer = recv_tensor_with_header(self.rank + 1, self.device, self.pp_group)
-                    output_tensor_for_grad.backward(gradient=grad_buffer)
                     
+                    # Send gradient to previous stage
                     if not self.is_first_stage and input_tensor_for_grad is not None:
                         if input_tensor_for_grad.grad is not None:
                             send_tensor_with_header(input_tensor_for_grad.grad, self.rank - 1, self.pp_group)
-                        else:
-                            zero_grad = torch.zeros_like(input_tensor_for_grad)
-                            send_tensor_with_header(zero_grad, self.rank - 1, self.pp_group)
-
-        if hasattr(self, 'max_grad_norm') and self.max_grad_norm > 0:
+                else:
+                    # Receive gradient from next stage
+                    grad_buffer = recv_tensor_with_header(
+                        self.rank + 1, self.device, self.pp_group, dtype=output_tensor_for_grad.dtype
+                    )
+                    
+                    # Scale gradient for accumulation
+                    scaled_grad = grad_buffer / num_micro_batches
+                    output_tensor_for_grad.backward(gradient=scaled_grad)
+                    
+                    # Send gradient to previous stage
+                    if not self.is_first_stage and input_tensor_for_grad is not None:
+                        if input_tensor_for_grad.grad is not None:
+                            send_tensor_with_header(input_tensor_for_grad.grad, self.rank - 1, self.pp_group)
+        
+        # Gradient clipping
+        if self.max_grad_norm > 0:
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.max_grad_norm)
-
+        
+        # Optimizer step
         self.optimizer.step()
         
-        self.print_layer_debug_norms(self.model, self.rank, f"Epoch {epoch+1} End")
-
-        self.optimizer.zero_grad()
-        
+        # Return metrics
         if self.is_last_stage:
-            avg_loss = total_loss / num_micro_batches
-            
-            total_samples = sum(len(b['label']) for b in batches)
-            accuracy = (total_correct / total_samples) * 100
-            
+            avg_loss = total_loss / num_micro_batches if num_micro_batches > 0 else 0.0
+            accuracy = (total_correct / total_samples * 100) if total_samples > 0 else 0.0
             return avg_loss, accuracy
         else:
             return 0.0, 0.0
