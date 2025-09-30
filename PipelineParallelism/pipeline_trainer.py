@@ -85,7 +85,7 @@ class PipelineTrainer:
         self.pp_group = pp_group
         self.criterion = criterion
         self.device = device
-        self.max_grad_norm = max_grad_norm
+        self.max_grad_norm = 0
         
         # Initialize optimizer if not provided
         if optimizer is None:
@@ -327,7 +327,7 @@ class PipelineTrainer:
         
         # Main pipeline loop
         total_steps = num_micro_batches + pipeline_depth - 1
-        
+        # self.print_layer_debug_norms(self.model, self.rank, epoch)
         for step in tqdm(range(total_steps), desc=f"1F1B (Rank {self.rank})", disable=(self.rank != 0)):
             
             # --- FORWARD PASS (if we have batches left) ---
@@ -413,8 +413,8 @@ class PipelineTrainer:
                     )
                     
                     # Scale gradient for accumulation
-                    scaled_grad = grad_buffer / num_micro_batches
-                    output_tensor_for_grad.backward(gradient=scaled_grad)
+                    # scaled_grad = grad_buffer / num_micro_batches
+                    output_tensor_for_grad.backward(gradient=grad_buffer)
                     
                     # Send gradient to previous stage
                     if not self.is_first_stage and input_tensor_for_grad is not None:

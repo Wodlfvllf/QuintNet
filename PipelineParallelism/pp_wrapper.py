@@ -1,10 +1,11 @@
 import torch
 import torch.distributed as dist
 import torch.nn as nn
+from typing import List, Optional
 from .Processgroup import ProcessGroupManager
 
 class PipelineParallelWrapper(nn.Module):
-    def __init__(self, model, pp_group, split_points: Optional[List[str]] = None):
+    def __init__(self, model, pgm: ProcessGroupManager, split_points: Optional[List[str]] = None):
         """
         model: The full model to be split across pipeline stages
         pp_group: process group for pipeline parallelism
@@ -12,10 +13,11 @@ class PipelineParallelWrapper(nn.Module):
         """
         super(PipelineParallelWrapper, self).__init__()
         assert dist.is_initialized(), "torch.distributed must be initialized"
-        
-        self.pp_group = pp_group
-        self.rank = dist.get_rank(pp_group)
-        self.world_size = dist.get_world_size(pp_group)
+
+        self.pp_group = pgm.get_pp_group()
+        assert self.pp_group is not None, "Pipeline parallel group not initialized"
+        self.rank = dist.get_rank(self.pp_group)
+        self.world_size = dist.get_world_size(self.pp_group)
         self.num_stages = self.world_size
         self.stage_idx = self.rank
         
