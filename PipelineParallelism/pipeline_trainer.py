@@ -1007,12 +1007,15 @@ class PipelineTrainer:
         # PHASE 3: COOLDOWN - Drain the pipeline
         # ===================================================================
         for i in range(num_cooldown_microbatches):
+            print(f"[Rank {self.rank}] Cooldown backward pass {i+1}/{num_cooldown_microbatches} starting")
             bwd_batch_idx = i + num_steady_microbatches
             batch_bwd = batches[bwd_batch_idx]
             input_tensor_bwd = fwd_inputs_q.popleft()
             output_tensor_bwd = fwd_outputs_q.popleft()
-            
+            print(f"[Rank {self.rank}] Popped tensors for cooldown backward")
             if self.is_last_stage:
+                print(f"[Rank {self.rank}] Computing loss for cooldown backward")
+                # Last stage: compute loss and send gradient
                 target = batch_bwd['label'].to(self.device, dtype=torch.long) if 'label' in batch_bwd else batch_bwd['labels'].to(self.device, dtype=torch.long)
                 loss = self.criterion(output_tensor_bwd, target)
                 total_loss += loss.item()
@@ -1023,14 +1026,19 @@ class PipelineTrainer:
                 scaled_loss.backward()
                 if not self.is_first_stage and input_tensor_bwd is not None:
                     if input_tensor_bwd.grad is not None:
+                        print(f"[Rank {self.rank}] Sending gradient to previous stage for cooldown backward")
                         pipeline_send(input_tensor_bwd.grad, self.rank - 1, self.pp_group)
+                        print(f"[Rank {self.rank}] Sent gradient to previous stage for cooldown backward")
             else:
+                print(f"[Rank {self.rank}] Receiving gradient from next stage for cooldown backward")
+                # Non-last stages: receive gradient and backprop
                 grad_buffer = pipeline_recv(self.rank + 1, self.device, self.pp_group, dtype=output_tensor_bwd.dtype)
                 output_tensor_bwd.backward(gradient=grad_buffer)
                 if not self.is_first_stage and input_tensor_bwd is not None:
                     if input_tensor_bwd.grad is not None:
+                        print(f"[Rank {self.rank}] Sending gradient to previous stage for cooldown backward")
                         pipeline_send(input_tensor_bwd.grad, self.rank - 1, self.pp_group)
-            
+                        print(f"[Rank {self.rank}] Sent gradient to previous stage for cooldown backward")            
             if self.rank == 0:
                 pbar.update(1)
 
