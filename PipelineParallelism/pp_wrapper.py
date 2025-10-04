@@ -1,257 +1,136 @@
+"""
+Pipeline Parallel Wrapper for Vision Transformer.
+Splits model across pipeline stages.
+"""
+
 import torch
-import torch.distributed as dist
 import torch.nn as nn
-from typing import List, Optional
-from .Processgroup import ProcessGroupManager
+
 
 class PipelineParallelWrapper(nn.Module):
-    def __init__(self, model, pgm: ProcessGroupManager, split_points: Optional[List[str]] = None):
+    """
+    Wraps a Vision Transformer model for pipeline parallelism.
+    Distributes transformer blocks across multiple GPUs.
+    """
+    def __init__(self, model, pgm):
         """
-        model: The full model to be split across pipeline stages
-        pp_group: process group for pipeline parallelism
-        split_points: Optional list of module names to use as split boundaries
+        Args:
+            model: The complete ViT model to be split
+            pgm: ProcessGroupManager instance
         """
-        super(PipelineParallelWrapper, self).__init__()
-        assert dist.is_initialized(), "torch.distributed must be initialized"
-
-        self.pp_group = pgm.get_pp_group()
-        assert self.pp_group is not None, "Pipeline parallel group not initialized"
-        self.rank = dist.get_rank(self.pp_group)
-        self.world_size = dist.get_world_size(self.pp_group)
-        self.num_stages = self.world_size
-        self.stage_idx = self.rank
+        super().__init__()
         
-        # Store original model structure
-        self.full_model = model
+        self.pgm = pgm
+        self.rank = pgm.get_pp_rank()
+        self.world_size = pgm.get_pp_world_size()
+        self.is_first_stage = pgm.is_first_stage()
+        self.is_last_stage = pgm.is_last_stage()
         
-        # Intelligently split the model
-        if split_points:
-            self.local_module = self._split_at_points(model, split_points)
-        else:
-            self.local_module = self._intelligent_split(model)
+        # Get model depth (number of transformer blocks)
+        self.depth = len(model.blocks)
         
-        # Store info about first/last stages
-        self.is_first_stage = (self.stage_idx == 0)
-        self.is_last_stage = (self.stage_idx == self.num_stages - 1)
+        # Determine which layers belong to this stage
+        self.layer_distribution = self.distribute_layers(self.depth)
         
-        print(f"Rank {self.rank}: Initialized stage {self.stage_idx}/{self.num_stages-1}")
-        self._print_stage_info()
-
-    def _get_model_type(self, model):
-        """Detect the type of model for intelligent splitting"""
-        # Check if it's a Vision Transformer
-        has_embedding = hasattr(model, 'embedding')
-        has_blocks = hasattr(model, 'blocks')
-        has_classification_head = hasattr(model, 'classification_head')
+        # Build local module for this stage
+        self.local_module = self._build_local_module(model)
         
-        if has_embedding and has_blocks and has_classification_head:
-            return 'vit'
+        # Move to correct device
+        device = torch.device(f"cuda:{self.rank}")
+        self.local_module = self.local_module.to(device)
         
-        # Check if it's a standard transformer
-        if has_blocks:
-            return 'transformer'
-        
-        # Default to generic
-        return 'generic'
+        print(f"[PipelineWrapper Rank {self.rank}] Initialized with blocks {self.layer_distribution}")
     
-    def _intelligent_split(self, model):
-        """Intelligently split model based on its architecture"""
-        model_type = self._get_model_type(model)
+    def distribute_layers(self, num_layers):
+        """
+        Distribute transformer blocks across GPUs as evenly as possible.
         
-        if model_type == 'vit':
-            return self._split_vit_model(model)
-        elif model_type == 'transformer':
-            return self._split_transformer_model(model)
-        else:
-            return self._generic_split(model)
+        Args:
+            num_layers: Total number of transformer blocks
+        
+        Returns:
+            List of block indices for this pipeline stage
+        """
+        # Calculate blocks per GPU
+        layers_per_gpu = [
+            num_layers // self.world_size + (1 if i < num_layers % self.world_size else 0)
+            for i in range(self.world_size)
+        ]
+        
+        # Calculate starting block for this GPU
+        start_layer = sum(layers_per_gpu[:self.rank])
+        end_layer = start_layer + layers_per_gpu[self.rank]
+        
+        return list(range(start_layer, end_layer))
     
-    def _split_vit_model(self, model):
-        """Split Vision Transformer model intelligently"""
-        # Vision Transformer has: embedding, transformer blocks, classification head
+    def _build_local_module(self, model):
+        """
+        Build the local module for this pipeline stage.
         
-        # Count total components
-        num_blocks = len(model.blocks) if hasattr(model, 'blocks') else 0
-        total_components = 1 + num_blocks + 1  # embedding + blocks + head
+        Args:
+            model: The complete model
         
-        if self.num_stages == 1:
-            return model
+        Returns:
+            nn.Sequential containing the layers for this stage
+        """
+        modules = []
         
-        if self.num_stages == 2:
-            if self.stage_idx == 0:
-                # First stage: embedding + half of transformer blocks
-                modules = [model.embedding]
-                half_blocks = num_blocks // 2
-                modules.extend(model.blocks[:half_blocks])
-                return nn.Sequential(*modules)
-            else:
-                # Second stage: rest of blocks + classification head
-                half_blocks = num_blocks // 2
-                modules = list(model.blocks[half_blocks:])
-                modules.append(model.classification_head)
-                return nn.Sequential(*modules)
-            
-        elif self.num_stages == 3:
-            if self.stage_idx == 0:
-                # First stage: embedding + first third of blocks
-                modules = [model.embedding]
-                first_third = num_blocks // 3
-                modules.extend(model.blocks[:first_third])
-                return nn.Sequential(*modules)
-            elif self.stage_idx == 1:
-                # Middle stage: middle blocks
-                first_third = num_blocks // 3
-                second_third = 2 * num_blocks // 3
-                return nn.Sequential(*model.blocks[first_third:second_third])
-            else:
-                # Last stage: last blocks + classification head
-                second_third = 2 * num_blocks // 3
-                modules = list(model.blocks[second_third:])
-                modules.append(model.classification_head)
-                return nn.Sequential(*modules)
-
-        else:
-            # For 4 or more stages, distribute transformer blocks evenly
-            # Stage 0: embedding
-            # Stage 1 to N-2: transformer blocks
-            # Stage N-1: classification head
-            
-            if self.stage_idx == 0:
-                # First stage: only embedding
-                return model.embedding
-            elif self.stage_idx == self.num_stages - 1:
-                # Last stage: only classification head
-                return model.classification_head
-            else:
-                # Middle stages: distribute transformer blocks
-                blocks_per_stage = num_blocks // (self.num_stages - 2)
-                remainder = num_blocks % (self.num_stages - 2)
-                
-                # Calculate which blocks belong to this stage
-                stage_in_blocks = self.stage_idx - 1  # Adjusted index for block stages
-                start_idx = stage_in_blocks * blocks_per_stage + min(stage_in_blocks, remainder)
-                end_idx = start_idx + blocks_per_stage + (1 if stage_in_blocks < remainder else 0)
-                
-                if start_idx >= num_blocks:
-                    # If no blocks assigned, create identity
-                    return nn.Identity()
-                
-                stage_blocks = model.blocks[start_idx:end_idx]
-                if len(stage_blocks) == 1:
-                    return stage_blocks[0]
-                else:
-                    return nn.Sequential(*stage_blocks)
-                
-    def _split_transformer_model(self, model):
-        """Split a transformer model with blocks"""
-        if not hasattr(model, 'blocks'):
-            return self._generic_split(model)
+        # First stage: add embedding
+        if self.is_first_stage:
+            modules.append(model.embedding)
         
-        num_blocks = len(model.blocks)
-        blocks_per_stage = num_blocks // self.num_stages
-        remainder = num_blocks % self.num_stages
+        # All stages: add assigned transformer blocks
+        for block_idx in self.layer_distribution:
+            modules.append(model.blocks[block_idx])
         
-        start_idx = self.stage_idx * blocks_per_stage + min(self.stage_idx, remainder)
-        stage_size = blocks_per_stage + (1 if self.stage_idx < remainder else 0)
-        end_idx = start_idx + stage_size
+        # Last stage: add classification head
+        if self.is_last_stage:
+            modules.append(model.classification_head)
         
-        stage_modules = model.blocks[start_idx:end_idx]
-        
-        if len(stage_modules) == 1:
-            return stage_modules[0]
-        else:
-            return nn.Sequential(*stage_modules)
-        
-    def _generic_split(self, model):
-        """Generic split for unknown model types - preserves module boundaries"""
-        # Get top-level children modules
-        children = list(model.children())
-        
-        if len(children) == 0:
-            # If no children, return the model itself to one stage
-            if self.stage_idx == 0:
-                return model
-            else:
-                return nn.Identity()
-            
-        # Distribute children across stages
-        num_children = len(children)
-        children_per_stage = num_children // self.num_stages
-        remainder = num_children % self.num_stages
-        
-        start_idx = self.stage_idx * children_per_stage + min(self.stage_idx, remainder)
-        stage_size = children_per_stage + (1 if self.stage_idx < remainder else 0)
-        end_idx = start_idx + stage_size
-        
-        stage_children = children[start_idx:end_idx]
-        
-        if len(stage_children) == 0:
-            return nn.Identity()
-        elif len(stage_children) == 1:
-            return stage_children[0]
-        else:
-            return nn.Sequential(*stage_children)
-        
-    def _split_at_points(self, model, split_points: List[str]):
-        """Split model at specific named module boundaries"""
-        # This method allows manual specification of split points
-        # Useful for complex models where automatic splitting fails
-        
-        named_modules = dict(model.named_modules())
-        
-        # Verify split points exist
-        for point in split_points:
-            if point not in named_modules:
-                raise ValueError(f"Split point '{point}' not found in model")
-        
-        # Create stages based on split points
-        # Implementation would depend on specific requirements
-        raise NotImplementedError("Manual split points not yet implemented")
+        return nn.Sequential(*modules)
     
-    def _print_stage_info(self):
-        """Print information about what this stage contains"""
-        print(f"\n=== Stage {self.stage_idx} Info ===")
-        print(f"Stage type: {type(self.local_module).__name__}")
-        
-        if isinstance(self.local_module, nn.Sequential):
-            print(f"Contains {len(self.local_module)} sequential modules:")
-            for i, module in enumerate(self.local_module):
-                print(f"  [{i}] {type(module).__name__}")
-        else:
-            print(f"Single module: {type(self.local_module).__name__}")
-        
-        # Count parameters
-        num_params = sum(p.numel() for p in self.local_module.parameters())
-        print(f"Total parameters in stage: {num_params:,}")
-        print("=" * 40)
-        
     def forward(self, x):
-        """Forward pass through local stage"""
+        """
+        Forward pass through this pipeline stage.
+        
+        Args:
+            x: Input tensor (images for first stage, hidden states for others)
+        
+        Returns:
+            Output tensor for next stage or final predictions
+        """
         return self.local_module(x)
     
-    def parameters(self):
-        """Return parameters of local module"""
-        return self.local_module.parameters()
-    
-    def named_parameters(self):
-        """Return named parameters of local module"""
-        return self.local_module.named_parameters()
-    
-    def train(self, mode=True):
-        """Set training mode"""
-        super().train(mode)
-        self.local_module.train(mode)
-        return self
-    
-    def eval(self):
-        """Set evaluation mode"""
-        super().eval()
-        self.local_module.eval()
-        return self
-    
-    def state_dict(self):
-        """Return state dict of local module"""
-        return self.local_module.state_dict()
-    
-    def load_state_dict(self, state_dict):
-        """Load state dict to local module"""
-        return self.local_module.load_state_dict(state_dict)
+    def backward(self, input_tensor, output_tensor, output_tensor_grad):
+        """
+        Backward pass for this pipeline stage.
+        
+        Args:
+            input_tensor: Input to forward pass (to compute input gradients)
+            output_tensor: Output from forward pass
+            output_tensor_grad: Gradient from next stage
+        
+        Returns:
+            Gradient with respect to input tensor
+        """
+        # Retain gradient for input tensor if it exists
+        if input_tensor is not None:
+            input_tensor.retain_grad()
+        
+        # If no gradient provided (last stage), create ones tensor
+        if output_tensor_grad is None:
+            output_tensor_grad = torch.ones_like(
+                output_tensor, 
+                memory_format=torch.preserve_format
+            )
+        
+        # Perform backward pass
+        torch.autograd.backward(
+            output_tensor,
+            grad_tensors=output_tensor_grad,
+            retain_graph=False,
+            create_graph=False
+        )
+        
+        # Return input gradient to send to previous stage
+        return input_tensor.grad if input_tensor is not None else None
