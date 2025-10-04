@@ -1,116 +1,3 @@
-# import torch
-# import torch.distributed as dist
-# import torch.nn as nn
-# import os
-
-# class Send(torch.autograd.Function):
-#     @staticmethod
-#     def forward(ctx, tensor, dest_rank, group):
-#         """
-#         Send a tensor to the destination rank.
-#         Protocol:
-#         1. Send the number of dimensions (1-element tensor).
-#         2. Send the shape (N-element tensor, where N is the number of dimensions).
-#         3. Send the actual tensor data.
-#         """
-#         # Ensure tensor is on the correct device and contiguous
-#         tensor_to_send = tensor.contiguous()
-
-#         # Store context for the backward pass
-#         ctx.dest_rank = dest_rank
-#         ctx.group = group
-#         ctx.tensor_shape = tensor.shape
-#         ctx.tensor_dtype = tensor.dtype
-
-#         # 1. Send the number of dimensions
-#         # FIX: Used tensor.dim() for a more direct way to get the number of dimensions.
-#         num_dims = torch.tensor([tensor.dim()], dtype=torch.long, device=tensor.device)
-#         dist.send(tensor=num_dims, dst=dest_rank, group=group)
-
-#         # 2. Send the shape
-#         shape_tensor = torch.tensor(tensor.shape, dtype=torch.long, device=tensor.device)
-#         dist.send(tensor=shape_tensor, dst=dest_rank, group=group)
-
-#         # 3. Send the tensor data
-#         dist.send(tensor=tensor_to_send, dst=dest_rank, group=group)
-        
-#         # Return the original tensor to maintain the computational graph on the sender's side
-#         return tensor
-
-#     @staticmethod
-#     def backward(ctx, grad_output):
-#         """
-#         Receive gradients from the destination rank during the backward pass.
-#         """
-#         # The gradient is coming from the rank we sent the tensor to.
-#         src_rank = ctx.dest_rank
-        
-#         # Pre-allocate a tensor to receive the gradient
-#         grad_tensor = torch.zeros(
-#             ctx.tensor_shape,
-#             dtype=ctx.tensor_dtype,
-#             device=grad_output.device  # Ensure grad is on the same device
-#         )
-        
-#         dist.recv(tensor=grad_tensor, src=src_rank, group=ctx.group)
-        
-#         # The returned gradients must correspond to the inputs of the forward function.
-#         # In this case: tensor, dest_rank, group
-#         return grad_tensor, None, None
-
-
-# class Recv(torch.autograd.Function):
-#     @staticmethod
-#     def forward(ctx, src_rank, device, group):
-#         """
-#         Receive a tensor from the source rank.
-#         Protocol matches Send.forward:
-#         1. Receive the number of dimensions.
-#         2. Receive the shape.
-#         3. Receive the actual tensor data.
-#         """
-#         # Store context for the backward pass
-#         ctx.src_rank = src_rank
-#         ctx.group = group
-#         dtype = torch.float32  # Default dtype; can be modified as needed
-#         # 1. Receive the number of dimensions
-#         num_dims_tensor = torch.zeros(1, dtype=torch.long, device=device)
-#         # FIX: Changed src=0 to src=src_rank to receive from the correct source.
-#         dist.recv(tensor=num_dims_tensor, src=src_rank, group=group)
-#         num_dims = num_dims_tensor.item()
-
-#         # 2. Receive the shape
-#         shape_tensor = torch.zeros(num_dims, dtype=torch.long, device=device)
-#         # FIX: Changed src=0 to src=src_rank here as well.
-#         dist.recv(tensor=shape_tensor, src=src_rank, group=group)
-#         tensor_shape = shape_tensor.tolist()
-        
-#         # 3. Receive the tensor data
-#         # FIX: The print statement no longer causes a NameError.
-#         # print(f"Recv.forward: Preparing to receive tensor with shape {tensor_shape}")
-#         received_tensor = torch.zeros(tensor_shape, dtype=dtype, device=device)
-#         dist.recv(tensor=received_tensor, src=src_rank, group=group)
-
-#         return received_tensor
-
-#     @staticmethod
-#     def backward(ctx, grad_output):
-#         """
-#         Send gradients back to the source rank during the backward pass.
-#         """
-#         # Send the gradient to the rank we received the tensor from.
-#         dest_rank = ctx.src_rank
-        
-#         # Ensure gradient is contiguous before sending
-#         grad_to_send = grad_output.contiguous()
-#         dist.send(tensor=grad_to_send, dst=dest_rank, group=ctx.group)
-        
-#         # The returned gradients must correspond to the inputs of the forward function.
-#         # Inputs: src_rank, device, group, dtype
-#         # FIX: Returned 4 None values to match the 4 inputs of the forward function.
-#         return None, None, None, None
-
-
 import torch
 import torch.distributed as dist
 import torch.nn as nn
@@ -245,70 +132,75 @@ class Recv(torch.autograd.Function):
         
         return None, None, None
     
-    
-    
+
 """
-Picotron-style pipeline parallel communication utilities
+Communication operations for pipeline parallelism.
+Handles point-to-point communication between pipeline stages.
 """
+
+import os
 import torch
 import torch.distributed as dist
-from typing import Optional, Tuple
 
-def pipeline_communicate(
-    operation: str,
-    device: torch.device,
-    dtype: torch.dtype,
-    tensor: Optional[torch.Tensor] = None,
-    shapes: Optional[Tuple] = None,
-    pp_group = None,
-    pp_rank: int = 0,
-    pp_size: int = 1
-) -> Optional[torch.Tensor]:
+
+# Global step counter for debugging
+STEP = 0
+VERBOSE = os.environ.get("VERBOSE", "0") == "1"
+
+
+def pipeline_communicate(operation, pgm, device, dtype, tensor=None, shapes=None):
     """
-    Non-blocking pipeline communication using batch_isend_irecv.
+    Handles unidirectional communication between pipeline stages.
     
     Args:
         operation: One of ['recv_forward', 'send_forward', 'recv_backward', 'send_backward']
-        device: Device for tensor operations
+        pgm: ProcessGroupManager instance
+        device: Device to allocate tensors on
         dtype: Data type for tensors
         tensor: Tensor to send (for send operations)
-        shapes: Shape tuple for receiving (for recv operations)
-        pp_group: Pipeline parallel process group
-        pp_rank: Rank in pipeline parallel group
-        pp_size: Size of pipeline parallel group
+        shapes: Shape tuple for receiving tensors (for recv operations)
+    
+    Returns:
+        Received tensor for recv operations, None for send operations
     """
-    is_first_stage = (pp_rank == 0)
-    is_last_stage = (pp_rank == pp_size - 1)
+    global STEP
+    global VERBOSE
+    
+    pp_group = pgm.get_pp_group()
+    pp_rank = pgm.get_pp_rank()
     
     if operation == 'recv_forward':
-        if is_first_stage:
+        # First stage receives input from dataloader, not from previous stage
+        if pgm.is_first_stage():
             return None
         tensor = torch.empty(shapes, requires_grad=True, device=device, dtype=dtype)
-        src = pp_rank - 1  # Previous stage
+        src = pgm.get_prev_rank()
         
     elif operation == 'send_forward':
-        if is_last_stage:
-            return None
-        dest = pp_rank + 1  # Next stage
+        # Last stage doesn't send forward activations (outputs loss instead)
+        if pgm.is_last_stage():
+            return
+        dest = pgm.get_next_rank()
         
     elif operation == 'recv_backward':
-        if is_last_stage:
+        # Last stage doesn't receive backward gradients (computes loss gradient)
+        if pgm.is_last_stage():
             return None
         tensor = torch.empty(shapes, requires_grad=True, device=device, dtype=dtype)
-        src = pp_rank + 1  # Next stage
+        src = pgm.get_next_rank()
         
     elif operation == 'send_backward':
-        if is_first_stage:
-            return None
-        dest = pp_rank - 1  # Previous stage
+        # First stage doesn't send backward gradients
+        if pgm.is_first_stage():
+            return
+        dest = pgm.get_prev_rank()
     else:
         raise ValueError(f"Unknown operation: {operation}")
     
-    # Determine if this is a send or receive operation
     is_send = operation.startswith('send')
     peer_rank = dest if is_send else src
     
-    # Create P2P operation
+    # Create point-to-point operation
     op = dist.P2POp(
         dist.isend if is_send else dist.irecv,
         tensor,
@@ -316,69 +208,79 @@ def pipeline_communicate(
         group=pp_group
     )
     
-    # Execute non-blocking communication
-    reqs = dist.batch_isend_irecv([op])
+    if VERBOSE:
+        direction = '→' if is_send else '←'
+        action = 'sending' if is_send else 'receiving'
+        phase = operation.split('_')[1]
+        print(f"{operation} | {action} {phase} {pp_rank} "
+              f"{direction} {peer_rank} | STEP:{STEP} | RANK:{pp_rank}", 
+              flush=True)
     
-    # Wait for completion
+    # Execute communication
+    reqs = dist.batch_isend_irecv([op])
     for req in reqs:
         req.wait()
-    
-    # Ensure CUDA operations are complete
     torch.cuda.synchronize()
+    
+    if VERBOSE:
+        STEP += 1
     
     return tensor if not is_send else None
 
 
-def bidirectional_pipeline_communicate(
-    operation: str,
-    send_tensor: torch.Tensor,
-    recv_shapes: Tuple,
-    device: torch.device,
-    dtype: torch.dtype,
-    pp_group = None,
-    pp_rank: int = 0,
-    pp_size: int = 1
-) -> Optional[torch.Tensor]:
+def bidirectional_pipeline_communicate(operation, pgm, send_tensor, recv_shapes, device, dtype):
     """
-    Bidirectional non-blocking communication for pipeline parallelism.
-    Sends and receives simultaneously for better overlap.
+    Handles bidirectional communication between pipeline stages (send and recv simultaneously).
+    Used in 1F1B schedule to overlap forward and backward communications.
     
     Args:
-        operation: Either 'send_fwd_recv_bwd' or 'send_bwd_recv_fwd'
+        operation: One of ['send_fwd_recv_bwd', 'send_bwd_recv_fwd']
+        pgm: ProcessGroupManager instance
         send_tensor: Tensor to send
-        recv_shapes: Shape for receiving tensor
-        device: Device for tensor operations
+        recv_shapes: Shape tuple for receiving tensor
+        device: Device to allocate tensors on
         dtype: Data type for tensors
-        pp_group: Pipeline parallel process group
-        pp_rank: Rank in pipeline parallel group
-        pp_size: Size of pipeline parallel group
+    
+    Returns:
+        Received tensor
     """
-    is_first_stage = (pp_rank == 0)
-    is_last_stage = (pp_rank == pp_size - 1)
+    global STEP
+    global VERBOSE
+    
+    pp_group = pgm.get_pp_group()
+    pp_rank = pgm.get_pp_rank()
     
     is_fwd = (operation == 'send_fwd_recv_bwd')
     
-    # Check if we need to communicate
-    if (is_fwd and is_last_stage) or (not is_fwd and is_first_stage):
+    # Boundary conditions: first/last stages don't do bidirectional communication
+    if (is_fwd and pgm.is_last_stage()) or (not is_fwd and pgm.is_first_stage()):
         return None
     
-    # Determine peer rank
-    peer_rank = (pp_rank + 1) if is_fwd else (pp_rank - 1)
+    # Determine peer rank based on operation
+    peer_rank = pgm.get_next_rank() if is_fwd else pgm.get_prev_rank()
     
-    # Create receive tensor
+    # Allocate receive buffer
     recv_tensor = torch.empty(recv_shapes, requires_grad=True, device=device, dtype=dtype)
     
-    # Create bidirectional P2P operations
+    # Create bidirectional operations
     reqs = dist.batch_isend_irecv([
         dist.P2POp(dist.isend, send_tensor, peer_rank, group=pp_group),
         dist.P2POp(dist.irecv, recv_tensor, peer_rank, group=pp_group)
     ])
     
+    if VERBOSE:
+        send_dir = 'next' if is_fwd else 'prev'
+        recv_dir = 'next' if is_fwd else 'prev'
+        print(f"{operation} | sending {send_dir} {pp_rank} -> {peer_rank} | "
+              f"receiving {recv_dir} {peer_rank} -> {pp_rank} | "
+              f"STEP={STEP} | RANK:{pp_rank}", flush=True)
+    
     # Wait for both operations to complete
     for req in reqs:
         req.wait()
-    
-    # Ensure CUDA operations are complete
     torch.cuda.synchronize()
+    
+    if VERBOSE:
+        STEP += 1
     
     return recv_tensor
