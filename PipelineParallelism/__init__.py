@@ -1,11 +1,16 @@
-from .pp_wrapper import *
-from .Processgroup import *
-from .operations import Send, Recv
+"""
+Pipeline Parallelism Module
+"""
+
+from .Processgroup import ProcessGroupManager
+from .operations import pipeline_communicate, bidirectional_pipeline_communicate
+from .pp_wrapper import PipelineParallelWrapper
 from .pipeline_trainer import PipelineTrainer
+
 __all__ = [
-    'PipelineParallelWrapper',
     'ProcessGroupManager',
-    'Send',
-    'Recv',
-    'PipelineTrainer'
+    'pipeline_communicate',
+    'bidirectional_pipeline_communicate',
+    'PipelineParallelWrapper',
+    'PipelineTrainer',
 ]

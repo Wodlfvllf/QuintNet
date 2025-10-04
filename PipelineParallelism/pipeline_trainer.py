@@ -1100,20 +1100,19 @@
 #         else:
 #             return None, None
 
-
 """
-Pipeline Parallel Trainer with AFAB and 1F1B schedules.
+Pipeline Parallel Trainer with AFAB and 1F1B schedules - WITH ACCURACY TRACKING
 """
 
 import torch
 import torch.nn.functional as F
+import torch.distributed as dist
 from .operations import pipeline_communicate, bidirectional_pipeline_communicate
 
 
 class PipelineTrainer:
     """
-    Trainer class for pipeline parallel training.
-    Implements AFAB and 1F1B training schedules.
+    Trainer class for pipeline parallel training with accuracy tracking.
     """
     def __init__(self, model, pp_group, criterion, device, optimizer=None, max_grad_norm=1.0):
         """
@@ -1135,23 +1134,26 @@ class PipelineTrainer:
         self.pgm = model.pgm
         self.rank = self.pgm.get_pp_rank()
         self.world_size = self.pgm.get_pp_world_size()
+        
+        # Track metrics during training
+        self.batch_labels = []
+        self.batch_predictions = []
     
     def train_step_afab(self, data_loader, tensor_shapes, device, dtype):
         """
-        All-Forward-All-Backward (AFAB) training step.
-        
-        Args:
-            data_loader: PipelineDataLoader instance
-            tensor_shapes: Expected tensor shapes for communication
-            device: CUDA device
-            dtype: Data type
+        All-Forward-All-Backward (AFAB) training step with accuracy tracking.
         
         Returns:
-            Loss value (only on last rank)
+            Tuple of (loss, accuracy) - only on last rank
         """
         logging_loss = 0.0
+        total_correct = 0
+        total_samples = 0
         input_tensors, output_tensors = [], []
         grad_acc_steps = data_loader.grad_acc_steps
+        
+        # Store labels for accuracy calculation
+        self.batch_labels = []
         
         # ===== ALL FORWARD PASSES =====
         for _ in range(grad_acc_steps):
@@ -1182,10 +1184,17 @@ class PipelineTrainer:
                 dtype=dtype
             )
             
-            # Calculate loss on last stage
+            # Calculate loss and accuracy on last stage
             if self.pgm.is_last_stage():
-                loss = self.criterion(output_tensor, batch["labels"].to(device))
-                logging_loss += loss.item() / grad_acc_steps
+                labels = batch["labels"].to(device)
+                loss = self.criterion(output_tensor, labels)
+                logging_loss += loss.item()
+                
+                # Calculate accuracy
+                _, predicted = torch.max(output_tensor, 1)
+                total_correct += (predicted == labels).sum().item()
+                total_samples += labels.size(0)
+                
                 output_tensor = loss
             
             # Save tensors for backward pass
@@ -1233,20 +1242,20 @@ class PipelineTrainer:
             self.optimizer.step()
             self.optimizer.zero_grad()
         
-        return logging_loss if self.pgm.is_last_stage() else None
+        # Return metrics
+        if self.pgm.is_last_stage():
+            avg_loss = logging_loss / grad_acc_steps
+            avg_accuracy = (total_correct / total_samples) * 100.0 if total_samples > 0 else 0.0
+            return avg_loss, avg_accuracy
+        else:
+            return None, None
     
     def train_step_1f1b(self, data_loader, tensor_shapes, device, dtype):
         """
-        1F1B (one-forward-one-backward) training step.
-        
-        Args:
-            data_loader: PipelineDataLoader instance
-            tensor_shapes: Expected tensor shapes for communication
-            device: CUDA device
-            dtype: Data type
+        1F1B (one-forward-one-backward) training step with accuracy tracking.
         
         Returns:
-            Loss value (only on last rank)
+            Tuple of (loss, accuracy) - only on last rank
         """
         grad_acc_steps = data_loader.grad_acc_steps
         
@@ -1258,6 +1267,8 @@ class PipelineTrainer:
         num_microbatches_remaining = grad_acc_steps - num_warmup_microbatches
         
         logging_loss = 0.0
+        total_correct = 0
+        total_samples = 0
         input_tensors, output_tensors = [], []
         
         def _forward_step(input_tensor):
@@ -1269,11 +1280,19 @@ class PipelineTrainer:
             else:
                 output_tensor = self.model.forward(input_tensor)
             
-            # Calculate loss on last stage
+            # Calculate loss and accuracy on last stage
             if self.pgm.is_last_stage():
-                loss = self.criterion(output_tensor, batch["labels"].to(device))
-                nonlocal logging_loss
-                logging_loss += loss.item() / grad_acc_steps
+                labels = batch["labels"].to(device)
+                loss = self.criterion(output_tensor, labels)
+                
+                nonlocal logging_loss, total_correct, total_samples
+                logging_loss += loss.item()
+                
+                # Calculate accuracy
+                _, predicted = torch.max(output_tensor, 1)
+                total_correct += (predicted == labels).sum().item()
+                total_samples += labels.size(0)
+                
                 output_tensor = loss
             
             return output_tensor
@@ -1398,32 +1417,74 @@ class PipelineTrainer:
             self.optimizer.step()
             self.optimizer.zero_grad()
         
-        return logging_loss if self.pgm.is_last_stage() else None
+        # Return metrics
+        if self.pgm.is_last_stage():
+            avg_loss = logging_loss / grad_acc_steps
+            avg_accuracy = (total_correct / total_samples) * 100.0 if total_samples > 0 else 0.0
+            return avg_loss, avg_accuracy
+        else:
+            return None, None
     
-    def evaluate_step(self, images, labels):
+    def evaluate(self, val_loader, tensor_shapes, device, dtype):
         """
-        Single evaluation step through the pipeline.
+        Evaluate the model on validation set with pipeline parallelism.
         
         Args:
-            images: Input images
-            labels: Ground truth labels
+            val_loader: Validation DataLoader
+            tensor_shapes: Expected tensor shapes for communication
+            device: CUDA device
+            dtype: Data type
         
         Returns:
-            Loss and accuracy (only on last rank)
+            Tuple of (avg_loss, avg_accuracy) - only on last rank
         """
-        # This is a simplified version - full implementation would need
-        # proper pipeline communication for evaluation
+        self.model.eval()
+        total_loss = 0.0
+        total_correct = 0
+        total_samples = 0
+        
         with torch.no_grad():
-            if self.pgm.is_first_stage():
-                output = self.model.forward(images)
-            else:
-                # In real implementation, receive from previous stage
-                return None, None
-            
-            if self.pgm.is_last_stage():
-                loss = self.criterion(output, labels)
-                _, predicted = torch.max(output, 1)
-                accuracy = (predicted == labels).float().mean()
-                return loss.item(), accuracy.item() * 100
-            
-        return None, None
+            for batch in val_loader:
+                # Receive activation from previous stage
+                input_tensor = pipeline_communicate(
+                    operation='recv_forward',
+                    pgm=self.pgm,
+                    device=device,
+                    dtype=dtype,
+                    shapes=tensor_shapes
+                )
+                
+                # Forward pass
+                if self.pgm.is_first_stage():
+                    output_tensor = self.model.forward(batch["image"].to(device))
+                else:
+                    output_tensor = self.model.forward(input_tensor)
+                
+                # Send activation to next stage
+                pipeline_communicate(
+                    operation='send_forward',
+                    pgm=self.pgm,
+                    tensor=output_tensor,
+                    device=device,
+                    dtype=dtype
+                )
+                
+                # Calculate metrics on last stage
+                if self.pgm.is_last_stage():
+                    labels = batch["label"].to(device)
+                    loss = self.criterion(output_tensor, labels)
+                    
+                    total_loss += loss.item() * labels.size(0)
+                    
+                    # Calculate accuracy
+                    _, predicted = torch.max(output_tensor, 1)
+                    total_correct += (predicted == labels).sum().item()
+                    total_samples += labels.size(0)
+        
+        # Return metrics
+        if self.pgm.is_last_stage() and total_samples > 0:
+            avg_loss = total_loss / total_samples
+            avg_accuracy = (total_correct / total_samples) * 100.0
+            return avg_loss, avg_accuracy
+        else:
+            return None, None
