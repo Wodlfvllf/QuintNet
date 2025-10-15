@@ -1,100 +1,91 @@
 
 
 import torch
-import torch.nn as nn
 import torch.distributed as dist
-from typing import Optional, Tuple, Union
+from typing import Tuple, Union
 import math
+import os
+from datetime import timedelta
 
-def _get_device(device_type: str = "cuda"):
-    """
-    Get the module corresponding to the device_type which is cuda or cuda-like device.
-    For example, when the device_type is cuda, the module `torch.cuda` is returned.
-    Return None when there is no corresponding module for device_type, otherwise
-    return the corresponding module.
-    """
-    return getattr(torch, device_type, None)
-    
+# It's good practice to have this at the top level
+# from torch._C._distributed_c10d import _get_default_group
+
 class MeshGenerator:
     def __init__(self,
-                mesh: Union[torch.Tensor, "ArrayLike"],
-                device_type: str = 'cuda',
-                mesh_dim: Tuple[int, ...] = (2,2,2),
-                mesh_name: Tuple[str, ...] = ('dp', 'pp', 'tp'),
-                is_backend_initialised: bool = False
+                 mesh: Union[torch.Tensor, "ArrayLike"],
+                 device_type: str = 'cuda',
+                 mesh_dim: Tuple[int, ...] = (2,2,2),
+                 mesh_name: Tuple[str, ...] = ('dp', 'pp', 'tp'),
+                 is_backend_initialised: bool = False
                 ):
-        
+
         if isinstance(mesh, torch.Tensor) and mesh.device.type != "cpu":
-                raise ValueError(f"`mesh` must be a CPU tensor, got {mesh}")
-            
+            raise ValueError(f"`mesh` must be a CPU tensor, got {mesh}")
+
         self.mesh = (
-                mesh.detach().to(dtype=torch.int)
-                if isinstance(mesh, torch.Tensor)
-                else torch.tensor(mesh, device="cpu", dtype=torch.int)
-            )
-        
+            mesh.detach().to(dtype=torch.int)
+            if isinstance(mesh, torch.Tensor)
+            else torch.tensor(mesh, device="cpu", dtype=torch.int)
+        )
+
         self.device_type = device_type
         self.mesh_dim = mesh_dim
         self.mesh_name = mesh_name
         
+        self.groups = {} # Will be populated by _init_process_groups
+
         if not is_backend_initialised:
-            #setup world group and device
             self._setup_group_and_device()
-            
-            #initialise each process groups
-            self._init_process_groups()
-            
-        #implement getitem function to allow slicing of mesh
+
+        # This needs to be called after setup
+        self._init_process_groups()
         
     def _setup_group_and_device(self):
-        rank = dist.get_rank()
-        world_size = dist.get_world_size()
-        
+        # CORRECTED: Call init_process_group first. Let it get rank/world_size from env.
         if not dist.is_initialized():
-            dist.init_process_group(
-                backend="nccl",
-                rank=rank,
-                world_size=world_size,
-                timeout=timedelta(seconds=60)  # Longer timeout for NCCL
-            )
+            dist.init_process_group(backend="nccl", timeout=timedelta(seconds=60))
+
+        # Now it's safe to call these
+        world_size = dist.get_world_size()
         
         if self.mesh.numel() > world_size:
             raise RuntimeError(
-                    f"Mesh should not be bigger than default world size {world_size}, but found {self.mesh.numel()} ranks!"
-                )
-            
-        device = _get_device()
-        if device and not device.is_initialized():
-            local_rank = int(os.environ["LOCAL_RANK"])
-            logger.info(
-                "Setting default device for the current process based on LOCAL_RANK=%s",
-                local_rank,
+                f"Mesh should not be bigger than default world size {world_size}, but found {self.mesh.numel()} ranks!"
             )
-            device_handle.set_device(local_rank)
-        
-        return _get_default_group()
-    
+
+        # CORRECTED: Simplified device setting logic
+        device_module = getattr(torch, self.device_type, None)
+        if device_module:
+            local_rank = int(os.environ["LOCAL_RANK"])
+            device_module.set_device(local_rank)
+
     def _init_process_groups(self):
-        self.groups = {}
-        default_group = _get_default_group()
-        if self.mesh.ndim == 1 and self.mesh.numel() == get_world_size():
-            ranks = list(range(dist.get_world_size()))
-            dim_group_names.append(dim_group.group_name)
-        else:
-            for dim in self.mesh.ndim:
-                process_groups_by_dim = self.mesh.swapdims(-1, dim).reshape(-1, self.mesh.size(dim))
-                for mesh_dim in process_groups_by_dim:
-                    sub_group_ranks = mesh_dim.tolist()
+        my_rank = dist.get_rank()
+
+        # CORRECTED: Use range(self.mesh.ndim) to iterate
+        for i, dim in enumerate(range(self.mesh.ndim)):
+            dim_name = self.mesh_name[dim]
+            
+            process_groups_by_dim = self.mesh.swapdims(-1, dim).reshape(-1, self.mesh.size(dim))
+            pg_name = self.mesh_name[i]
+            self.process_groups[pg_name] = process_groups_by_dim
+            for mesh_dim in process_groups_by_dim:
+                subgroup_ranks = mesh_dim.tolist()
+
+                # CORRECTED: Added the crucial check to find which group this rank belongs to
+                if my_rank in subgroup_ranks:
                     new_pg = dist.new_group(
                         ranks=subgroup_ranks,
                         backend="nccl"
                     )
-                    # Store the created group object in our dictionary.
                     self.groups[dim_name] = new_pg
-
-                    # IMPORTANT: Since we found our group for this dimension,
-                    # we can stop searching and move to the next dimension.
+                    
+                    # CORRECTED: Break only after finding our group for this dimension
                     break
+    
+    def get_group(self, dim_name: str) -> dist.ProcessGroup:
+        """Simple accessor to get the process group for a dimension."""
+        return self.groups[dim_name]
                 
         
         
@@ -120,11 +111,10 @@ def init_mesh(
                     "Only device_type cuda ia accepted",
                 )
     
-    if len(set(mesh_dim)) != len(mesh_name):
+    if len(mesh_dim) != len(mesh_name):
         raise RuntimeError(
-                    "Each mesh_dim_name must be unique.",
-                    f"Found repeated mesh_name in mesh_name {mesh_name}",
-                )
+            f"mesh_dim and mesh_name must have the same length, but got {len(mesh_dim)} and {len(mesh_name)}"
+        )
         
     with torch.device('cpu'):
         mesh = torch.arange(math.prod(mesh_dim), dtype=torch.int).view(mesh_dim)
