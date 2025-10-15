@@ -2,37 +2,100 @@
 
 import torch
 import torch.nn as nn
+import torch.distributed as dist
 from typing import Optional, Tuple, Union
 import math
 
+def _get_device(device_type: str = "cuda"):
+    """
+    Get the module corresponding to the device_type which is cuda or cuda-like device.
+    For example, when the device_type is cuda, the module `torch.cuda` is returned.
+    Return None when there is no corresponding module for device_type, otherwise
+    return the corresponding module.
+    """
+    return getattr(torch, device_type, None)
+    
 class MeshGenerator:
     def __init__(self,
                 mesh: Union[torch.Tensor, "ArrayLike"],
                 device_type: str = 'cuda',
                 mesh_dim: Tuple[int, ...] = (2,2,2),
-                mesh_name: Tuple[str, ...] = ('dp', 'pp', 'tp')
+                mesh_name: Tuple[str, ...] = ('dp', 'pp', 'tp'),
+                is_backend_initialised: bool = False
                 ):
         
-        #setup world group and device
+        if isinstance(mesh, torch.Tensor) and mesh.device.type != "cpu":
+                raise ValueError(f"`mesh` must be a CPU tensor, got {mesh}")
+            
+        self.mesh = (
+                mesh.detach().to(dtype=torch.int)
+                if isinstance(mesh, torch.Tensor)
+                else torch.tensor(mesh, device="cpu", dtype=torch.int)
+            )
         
-        #initialise each process groups
+        self.device_type = device_type
+        self.mesh_dim = mesh_dim
+        self.mesh_name = mesh_name
         
+        if not is_backend_initialised:
+            #setup world group and device
+            self._setup_group_and_device()
+            
+            #initialise each process groups
+            self._init_process_groups()
+            
         #implement getitem function to allow slicing of mesh
         
+    def _setup_group_and_device(self):
+        rank = dist.get_rank()
+        world_size = dist.get_world_size()
         
+        if not dist.is_initialized():
+            dist.init_process_group(
+                backend="nccl",
+                rank=rank,
+                world_size=world_size,
+                timeout=timedelta(seconds=60)  # Longer timeout for NCCL
+            )
         
-        # self.tensor_parallel_size = tensor_parallel_size
-        # self.pipeline_parallel_size = pipeline_parallel_size
-        # self.world_size = world_size
-        # assert self.world_size == self.tensor_parallel_size*self.pipeline_parallel_size, "Worlds size and dimensions of pipeline_parallel_size and pipeline_parallel_size doesn't match"
+        if self.mesh.numel() > world_size:
+            raise RuntimeError(
+                    f"Mesh should not be bigger than default world size {world_size}, but found {self.mesh.numel()} ranks!"
+                )
+            
+        device = _get_device()
+        if device and not device.is_initialized():
+            local_rank = int(os.environ["LOCAL_RANK"])
+            logger.info(
+                "Setting default device for the current process based on LOCAL_RANK=%s",
+                local_rank,
+            )
+            device_handle.set_device(local_rank)
         
-        # self.num_gpus = self.world_size
-        # self.gpu_matrix = torch.arange(self.num_gpus).reshape(self.tensor_parallel_size, self.pipeline_parallel_size)
-        
-        # self.pipeline_parallel_group = [self.gpu_matrix[i][j] for i in range(self.tensor_parallel_size) for j in range(self.pipeline_parallel_size)]
-        # self.tensor_parallel_size = [self.gpu_matrix[i][j] for i in range(self.pipeline_parallel_size) for j in range(self.tensor_parallel_size)]
-        
-        pass 
+        return _get_default_group()
+    
+    def _init_process_groups(self):
+        self.groups = {}
+        default_group = _get_default_group()
+        if self.mesh.ndim == 1 and self.mesh.numel() == get_world_size():
+            ranks = list(range(dist.get_world_size()))
+            dim_group_names.append(dim_group.group_name)
+        else:
+            for dim in self.mesh.ndim:
+                process_groups_by_dim = self.mesh.swapdims(-1, dim).reshape(-1, self.mesh.size(dim))
+                for mesh_dim in process_groups_by_dim:
+                    sub_group_ranks = mesh_dim.tolist()
+                    new_pg = dist.new_group(
+                        ranks=subgroup_ranks,
+                        backend="nccl"
+                    )
+                    # Store the created group object in our dictionary.
+                    self.groups[dim_name] = new_pg
+
+                    # IMPORTANT: Since we found our group for this dimension,
+                    # we can stop searching and move to the next dimension.
+                    break
+                
         
         
 def init_mesh(
