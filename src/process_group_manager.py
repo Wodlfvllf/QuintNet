@@ -102,7 +102,13 @@ class MeshGenerator:
         dp_coord = rank//(self.pp_size*self.tp_size)
         tp_coord = ((rank) // (self.pp_size))%(self.tp_size)
         pp_coord = (rank) % (self.pp_size)
-        return (dp_coord, tp_coord, pp_coord)
+        return [dp_coord, tp_coord, pp_coord]
+    
+    def get_coordinates_tensor_search(self, rank):
+        # self.mesh is the tensor torch.arange(N).view(dp, tp, pp)
+        # This finds where the rank is located in the tensor
+        # and returns its [row, col, depth] index.
+        return (self.mesh == rank).nonzero()[0].tolist()
         
         
 def init_mesh(
