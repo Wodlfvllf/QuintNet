@@ -27,7 +27,9 @@ class MeshGenerator:
             if isinstance(mesh, torch.Tensor)
             else torch.tensor(mesh, device="cpu", dtype=torch.int)
         )
-
+        self.dp_size = mesh_dim[0]
+        self.pp_size = mesh_dim[1]
+        self.tp_size = mesh_dim[2]        
         self.device_type = device_type
         self.mesh_dim = mesh_dim
         self.mesh_name = mesh_name
@@ -95,6 +97,12 @@ class MeshGenerator:
                 ans = dim_name
                 
         return ans
+            
+    def get_coordinates(self, rank):
+        dp_coord = rank//(self.pp_size*self.tp_size)
+        tp_coord = ((rank) // (self.pp_size))%(self.tp_size)
+        pp_coord = (rank) % (self.pp_size)
+        return (dp_coord, tp_coord, pp_coord)
         
         
 def init_mesh(
