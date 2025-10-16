@@ -12,7 +12,14 @@ class PipelineParallelWrapper(nn.Module):
     Wraps a Vision Transformer model for pipeline parallelism.
     Distributes transformer blocks across multiple GPUs.
     """
-    def __init__(self, model, pgm):
+    def __init__(self, 
+                 model, 
+                 device_mesh,
+                 rank,
+                 pp_group,
+                 pp_size,
+                 device
+                 ):
         """
         Args:
             model: The complete ViT model to be split
@@ -20,11 +27,12 @@ class PipelineParallelWrapper(nn.Module):
         """
         super().__init__()
         
-        self.pgm = pgm
-        self.rank = pgm.get_pp_rank()
-        self.world_size = pgm.get_pp_world_size()
-        self.is_first_stage = pgm.is_first_stage()
-        self.is_last_stage = pgm.is_last_stage()
+        self.device_mesh = device_mesh
+        self.rank = rank
+        self.world_size = pp_size
+        self.group = pp_group
+        self.is_first_stage = (self.rank == 0)
+        self.is_last_stage = (self.rank == self.world_size-1)
         
         # Get model depth (number of transformer blocks)
         self.depth = len(model.blocks)
@@ -36,7 +44,7 @@ class PipelineParallelWrapper(nn.Module):
         self.local_module = self._build_local_module(model)
         
         # Move to correct device
-        device = torch.device(f"cuda:{self.rank}")
+        device = self.device
         self.local_module = self.local_module.to(device)
         
         print(f"[PipelineWrapper Rank {self.rank}] Initialized with blocks {self.layer_distribution}")
