@@ -12,7 +12,13 @@ from .processgroup import ProcessGroupManager
 from .layers import ColumnParallelLinear, RowParallelLinear
 
 
-def apply_tensor_parallel(model: nn.Module, tp_size: int, gather_output=True, sync_gradients=True, method_of_parallelism="column"):
+def apply_tensor_parallel(model: nn.Module, 
+                          tp_size: int,
+                          tp_rank: int, 
+                          tp_group: dist.ProcessGroup,
+                          gather_output=True, 
+                          sync_gradients=True, 
+                          method_of_parallelism="column"):
     """
     Replace every nn.Linear with a ColumnParallelLinear that holds its out_feature shard.
     Assumes dist.init_process_group() is already called and we're doing pure TP (no DP).
@@ -24,10 +30,9 @@ def apply_tensor_parallel(model: nn.Module, tp_size: int, gather_output=True, sy
         sync_gradients: Whether to synchronize gradients (True when all ranks see same data)
         method_of_parallelism: "column" or "row" parallelism method
     """
-    pgm = ProcessGroupManager(tp_size)
-    tp_group = pgm.get_group()
-    tp_rank = pgm.get_tp_rank()
-    tp_world_size = pgm.get_tp_world_size()
+    tp_group = tp_group
+    tp_rank = tp_rank
+    tp_world_size = tp_size
     
     # Get the current device instead of global rank
     current_device = torch.cuda.current_device()
@@ -74,9 +79,18 @@ def apply_tensor_parallel(model: nn.Module, tp_size: int, gather_output=True, sy
                     start = tp_rank * rows_per_rank
                     end   = (tp_rank + 1) * rows_per_rank
                     weight_slice = child.weight[:, start:end]  # (out_f, rows_per_rank)
+                    
+                    # Inside your 'else' block for RowParallelLinear
                     bias_slice = None
                     if child.bias is not None:
-                        bias_slice = child.bias
+                        # Only the first rank in the TP group should store and add the bias.
+                        if tp_rank == 0:
+                            bias_slice = child.bias
+                        else:
+                            # All other ranks in the group have no bias.
+                            # Your RowParallelLinear layer's forward pass should handle the case
+                            # where self.bias is None.
+                            bias_slice = None
                         
                     shard = RowParallelLinear(
                         local_device=local_device,
