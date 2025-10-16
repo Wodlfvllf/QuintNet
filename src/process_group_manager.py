@@ -67,7 +67,7 @@ class MeshGenerator:
             dim_name = self.mesh_name[dim]
             
             process_groups_by_dim = self.mesh.swapdims(-1, dim).reshape(-1, self.mesh.size(dim))
-            self.process_groups[dim_name] = process_groups_by_dim
+            self.process_groups[dim_name] = list(process_groups_by_dim.flatten())
             
             for mesh_dim in process_groups_by_dim:
                 subgroup_ranks = mesh_dim.tolist()
@@ -86,7 +86,15 @@ class MeshGenerator:
     def get_group(self, dim_name: str) -> dist.ProcessGroup:
         """Simple accessor to get the process group for a dimension."""
         return self.groups[dim_name]
+    
+    def get_group_by_global_rank(self, global_rank: str) -> str:
+        ans: str = ""
+        for dim in range(self.mesh.ndim):
+            dim_name = self.mesh_name[dim]
+            if global_rank in self.process_groups[dim_name]:
+                ans = dim_name
                 
+        return ans
         
         
 def init_mesh(
