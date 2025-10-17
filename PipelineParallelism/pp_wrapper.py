@@ -44,9 +44,9 @@ class PipelineParallelWrapper(nn.Module):
         self.local_module = self._build_local_module(model)
         
         # Move to correct device
-        device = self.device
-        self.local_module = self.local_module.to(device)
-        
+        self.device = device
+        self.local_module = self.local_module.to(self.device)
+
         print(f"[PipelineWrapper Rank {self.rank}] Initialized with blocks {self.layer_distribution}")
     
     def distribute_layers(self, num_layers):
