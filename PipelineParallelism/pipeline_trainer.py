@@ -69,8 +69,11 @@ class PipelineTrainer:
             # Receive activation from previous stage
             input_tensor = pipeline_communicate(
                 operation='recv_forward',
-                pgm=self.pgm,
+                pp_group=self.pp_group,
+                pp_rank=self.rank,
                 device=device,
+                is_first_stage=self.is_first_stage,
+                is_last_stage=self.is_last_stage,
                 dtype=dtype,
                 shapes=tensor_shapes
             )
@@ -79,7 +82,7 @@ class PipelineTrainer:
             batch = next(data_loader)
             
             # Forward pass
-            if self.pgm.is_first_stage():
+            if self.is_first_stage:
                 output_tensor = self.model.forward(batch["images"].to(device))
             else:
                 output_tensor = self.model.forward(input_tensor)
@@ -87,14 +90,16 @@ class PipelineTrainer:
             # Send activation to next stage
             pipeline_communicate(
                 operation='send_forward',
-                pgm=self.pgm,
+                pp_group=self.pp_group,
+                pp_rank=self.rank,
                 tensor=output_tensor,
                 device=device,
-                dtype=dtype
+                dtype=dtype,
+                shapes=tensor_shapes
             )
             
             # Calculate loss and accuracy on last stage
-            if self.pgm.is_last_stage():
+            if self.is_last_stage:
                 labels = batch["labels"].to(device)
                 loss = self.criterion(output_tensor, labels)
                 logging_loss += loss.item()
@@ -115,7 +120,8 @@ class PipelineTrainer:
             # Receive gradient from next stage
             output_tensor_grad = pipeline_communicate(
                 operation='recv_backward',
-                pgm=self.pgm,
+                pp_group=self.pp_group,
+                pp_rank=self.rank,
                 device=device,
                 dtype=dtype,
                 shapes=tensor_shapes
@@ -135,10 +141,12 @@ class PipelineTrainer:
             # Send gradient to previous stage
             pipeline_communicate(
                 operation='send_backward',
-                pgm=self.pgm,
+                pp_group=self.pp_group,
+                pp_rank=self.rank,
                 tensor=input_tensor_grad,
                 device=device,
-                dtype=dtype
+                dtype=dtype,
+                shapes=tensor_shapes
             )
         
         # Optimizer step
@@ -152,7 +160,7 @@ class PipelineTrainer:
             self.optimizer.zero_grad()
         
         # Return metrics
-        if self.pgm.is_last_stage():
+        if self.is_last_stage:
             avg_loss = logging_loss / grad_acc_steps
             avg_accuracy = (total_correct / total_samples) * 100.0 if total_samples > 0 else 0.0
             return avg_loss, avg_accuracy
@@ -184,13 +192,13 @@ class PipelineTrainer:
             """Helper function for forward pass."""
             batch = next(data_loader)
             
-            if self.pgm.is_first_stage():
+            if self.is_first_stage:
                 output_tensor = self.model.forward(batch["images"].to(device))
             else:
                 output_tensor = self.model.forward(input_tensor)
             
             # Calculate loss and accuracy on last stage
-            if self.pgm.is_last_stage():
+            if self.is_last_stage:
                 labels = batch["labels"].to(device)
                 loss = self.criterion(output_tensor, labels)
                 
@@ -210,7 +218,8 @@ class PipelineTrainer:
         for _ in range(num_warmup_microbatches):
             input_tensor = pipeline_communicate(
                 operation='recv_forward',
-                pgm=self.pgm,
+                pp_group=self.pp_group,
+                pp_rank=self.rank,
                 device=device,
                 dtype=dtype,
                 shapes=tensor_shapes
@@ -218,10 +227,12 @@ class PipelineTrainer:
             output_tensor = _forward_step(input_tensor)
             pipeline_communicate(
                 operation='send_forward',
-                pgm=self.pgm,
+                pp_group=self.pp_group,
+                pp_rank=self.rank,
                 tensor=output_tensor,
                 device=device,
-                dtype=dtype
+                dtype=dtype,
+                shapes=tensor_shapes
             )
             input_tensors.append(input_tensor)
             output_tensors.append(output_tensor)
@@ -230,7 +241,8 @@ class PipelineTrainer:
         if num_microbatches_remaining > 0:
             input_tensor = pipeline_communicate(
                 operation='recv_forward',
-                pgm=self.pgm,
+                pp_group=self.pp_group,
+                pp_rank=self.rank,
                 device=device,
                 dtype=dtype,
                 shapes=tensor_shapes
@@ -245,11 +257,13 @@ class PipelineTrainer:
             # Bidirectional: send forward, receive backward
             output_tensor_grad = bidirectional_pipeline_communicate(
                 operation='send_fwd_recv_bwd',
-                pgm=self.pgm,
+                pp_group=self.pp_group,
+                pp_rank=self.rank,
                 send_tensor=output_tensor,
                 recv_shapes=tensor_shapes,
                 device=device,
-                dtype=dtype
+                dtype=dtype,
+                shapes=tensor_shapes
             )
             
             # Store current tensors
@@ -272,20 +286,24 @@ class PipelineTrainer:
                 input_tensor = None
                 pipeline_communicate(
                     operation='send_backward',
-                    pgm=self.pgm,
+                    pp_group=self.pp_group,
+                    pp_rank=self.rank,
                     tensor=input_tensor_grad,
                     device=device,
-                    dtype=dtype
+                    dtype=dtype,
+                    shapes=tensor_shapes
                 )
             else:
                 # Bidirectional: send backward, receive forward
                 input_tensor = bidirectional_pipeline_communicate(
                     operation='send_bwd_recv_fwd',
-                    pgm=self.pgm,
+                    pp_group=self.pp_group,
+                    pp_rank=self.rank,
                     send_tensor=input_tensor_grad,
                     recv_shapes=tensor_shapes,
                     device=device,
-                    dtype=dtype
+                    dtype=dtype,
+                    shapes=tensor_shapes
                 )
         
         # ===== COOLDOWN PHASE =====
@@ -296,7 +314,8 @@ class PipelineTrainer:
             
             output_tensor_grad = pipeline_communicate(
                 operation='recv_backward',
-                pgm=self.pgm,
+                pp_group=self.pp_group,
+                pp_rank=self.rank,
                 device=device,
                 dtype=dtype,
                 shapes=tensor_shapes
@@ -310,10 +329,12 @@ class PipelineTrainer:
             
             pipeline_communicate(
                 operation='send_backward',
-                pgm=self.pgm,
+                pp_group=self.pp_group,
+                pp_rank=self.rank,
                 tensor=input_tensor_grad,
                 device=device,
-                dtype=dtype
+                dtype=dtype,
+                shapes=tensor_shapes    
             )
         
         # Optimizer step
@@ -327,7 +348,7 @@ class PipelineTrainer:
             self.optimizer.zero_grad()
         
         # Return metrics
-        if self.pgm.is_last_stage():
+        if self.is_last_stage:
             avg_loss = logging_loss / grad_acc_steps
             avg_accuracy = (total_correct / total_samples) * 100.0 if total_samples > 0 else 0.0
             return avg_loss, avg_accuracy
@@ -357,14 +378,15 @@ class PipelineTrainer:
                 # Receive activation from previous stage
                 input_tensor = pipeline_communicate(
                     operation='recv_forward',
-                    pgm=self.pgm,
+                    pp_group=self.pp_group,
+                    pp_rank=self.rank,
                     device=device,
                     dtype=dtype,
                     shapes=tensor_shapes
                 )
                 
                 # Forward pass
-                if self.pgm.is_first_stage():
+                if self.is_first_stage:
                     output_tensor = self.model.forward(batch["image"].to(device))
                 else:
                     output_tensor = self.model.forward(input_tensor)
@@ -372,14 +394,16 @@ class PipelineTrainer:
                 # Send activation to next stage
                 pipeline_communicate(
                     operation='send_forward',
-                    pgm=self.pgm,
+                    pp_group=self.pp_group,
+                    pp_rank=self.rank,
                     tensor=output_tensor,
                     device=device,
-                    dtype=dtype
+                    dtype=dtype,
+                    shapes=tensor_shapes
                 )
                 
                 # Calculate metrics on last stage
-                if self.pgm.is_last_stage():
+                if self.is_last_stage:
                     labels = batch["label"].to(device)
                     loss = self.criterion(output_tensor, labels)
                     
@@ -391,7 +415,7 @@ class PipelineTrainer:
                     total_samples += labels.size(0)
         
         # Return metrics
-        if self.pgm.is_last_stage() and total_samples > 0:
+        if self.is_last_stage and total_samples > 0:
             avg_loss = total_loss / total_samples
             avg_accuracy = (total_correct / total_samples) * 100.0
             return avg_loss, avg_accuracy
