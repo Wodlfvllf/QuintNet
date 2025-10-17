@@ -95,6 +95,8 @@ class PipelineTrainer:
                 tensor=output_tensor,
                 device=device,
                 dtype=dtype,
+                is_first_stage=self.is_first_stage,
+                is_last_stage=self.is_last_stage,
                 shapes=tensor_shapes
             )
             
@@ -124,6 +126,8 @@ class PipelineTrainer:
                 pp_rank=self.rank,
                 device=device,
                 dtype=dtype,
+                is_first_stage=self.is_first_stage,
+                is_last_stage=self.is_last_stage,
                 shapes=tensor_shapes
             )
             
@@ -146,6 +150,8 @@ class PipelineTrainer:
                 tensor=input_tensor_grad,
                 device=device,
                 dtype=dtype,
+                is_first_stage=self.is_first_stage,
+                is_last_stage=self.is_last_stage,
                 shapes=tensor_shapes
             )
         
@@ -222,6 +228,8 @@ class PipelineTrainer:
                 pp_rank=self.rank,
                 device=device,
                 dtype=dtype,
+                is_first_stage=self.is_first_stage,
+                is_last_stage=self.is_last_stage,
                 shapes=tensor_shapes
             )
             output_tensor = _forward_step(input_tensor)
@@ -232,6 +240,8 @@ class PipelineTrainer:
                 tensor=output_tensor,
                 device=device,
                 dtype=dtype,
+                is_first_stage=self.is_first_stage,
+                is_last_stage=self.is_last_stage,
                 shapes=tensor_shapes
             )
             input_tensors.append(input_tensor)
@@ -245,6 +255,8 @@ class PipelineTrainer:
                 pp_rank=self.rank,
                 device=device,
                 dtype=dtype,
+                is_first_stage=self.is_first_stage,
+                is_last_stage=self.is_last_stage,
                 shapes=tensor_shapes
             )
         
@@ -263,6 +275,8 @@ class PipelineTrainer:
                 recv_shapes=tensor_shapes,
                 device=device,
                 dtype=dtype,
+                is_first_stage=self.is_first_stage,
+                is_last_stage=self.is_last_stage,
                 shapes=tensor_shapes
             )
             
@@ -291,6 +305,8 @@ class PipelineTrainer:
                     tensor=input_tensor_grad,
                     device=device,
                     dtype=dtype,
+                    is_first_stage=self.is_first_stage,
+                    is_last_stage=self.is_last_stage,
                     shapes=tensor_shapes
                 )
             else:
@@ -303,6 +319,8 @@ class PipelineTrainer:
                     recv_shapes=tensor_shapes,
                     device=device,
                     dtype=dtype,
+                    is_first_stage=self.is_first_stage,
+                    is_last_stage=self.is_last_stage,
                     shapes=tensor_shapes
                 )
         
@@ -318,6 +336,8 @@ class PipelineTrainer:
                 pp_rank=self.rank,
                 device=device,
                 dtype=dtype,
+                is_first_stage=self.is_first_stage,
+                is_last_stage=self.is_last_stage,
                 shapes=tensor_shapes
             )
             
@@ -334,6 +354,8 @@ class PipelineTrainer:
                 tensor=input_tensor_grad,
                 device=device,
                 dtype=dtype,
+                is_first_stage=self.is_first_stage,
+                is_last_stage=self.is_last_stage,
                 shapes=tensor_shapes    
             )
         

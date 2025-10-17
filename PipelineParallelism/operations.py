@@ -181,26 +181,26 @@ def pipeline_communicate(operation,
         if is_first_stage:
             return None
         tensor = torch.empty(shapes, requires_grad=True, device=device, dtype=dtype)
-        src = pgm.get_prev_rank()
+        src = pp_rank-1
         
     elif operation == 'send_forward':
         # Last stage doesn't send forward activations (outputs loss instead)
         if is_last_stage:
             return
-        dest = pgm.get_next_rank()
+        dest = pp_rank+1
         
     elif operation == 'recv_backward':
         # Last stage doesn't receive backward gradients (computes loss gradient)
         if is_last_stage:
             return None
         tensor = torch.empty(shapes, requires_grad=True, device=device, dtype=dtype)
-        src = pgm.get_next_rank()
+        src = pp_rank+1
         
     elif operation == 'send_backward':
         # First stage doesn't send backward gradients
         if is_first_stage:
             return
-        dest = pgm.get_prev_rank()
+        dest = pp_rank-1
     else:
         raise ValueError(f"Unknown operation: {operation}")
     
@@ -235,7 +235,16 @@ def pipeline_communicate(operation,
     return tensor if not is_send else None
 
 
-def bidirectional_pipeline_communicate(operation, pp_group, pp_rank, send_tensor, recv_shapes, device, dtype):
+def bidirectional_pipeline_communicate(operation, 
+                                       pp_group, 
+                                       pp_rank, 
+                                       send_tensor, 
+                                       recv_shapes, 
+                                       device, 
+                                       dtype,
+                                       is_first_stage=False,
+                                       is_last_stage=False
+                                       ):
     """
     Handles bidirectional communication between pipeline stages (send and recv simultaneously).
     Used in 1F1B schedule to overlap forward and backward communications.
