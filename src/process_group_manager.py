@@ -74,7 +74,7 @@ class MeshGenerator:
             for mesh_dim in process_groups_by_dim:
                 subgroup_ranks = mesh_dim.tolist()
 
-                # CORRECTED: Added the crucial check to find which group this rank belongs to
+                # Added the crucial check to find which group this rank belongs to
                 if my_rank in subgroup_ranks:
                     new_pg = dist.new_group(
                         ranks=subgroup_ranks,
@@ -82,7 +82,7 @@ class MeshGenerator:
                     )
                     self.groups[dim_name] = new_pg
                     
-                    # CORRECTED: Break only after finding our group for this dimension
+                    # Break only after finding our group for this dimension
                     break
     
     def get_group(self, dim_name: str) -> dist.ProcessGroup:
