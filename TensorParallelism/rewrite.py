@@ -16,6 +16,7 @@ def apply_tensor_parallel(model: nn.Module,
                           tp_size: int,
                           tp_rank: int, 
                           tp_group: dist.ProcessGroup,
+                          device : torch.device,
                           gather_output=True, 
                           sync_gradients=True, 
                           method_of_parallelism="column"):
@@ -35,8 +36,7 @@ def apply_tensor_parallel(model: nn.Module,
     tp_world_size = tp_size
     
     # Get the current device instead of global rank
-    current_device = torch.cuda.current_device()
-    local_device = torch.device(f"cuda:{current_device}")
+    local_device = device
 
     def replace_linear(module: nn.Module, module_path=""):
         for name, child in list(module.named_children()):
