@@ -69,7 +69,7 @@ class MeshGenerator:
             dim_name = self.mesh_name[dim]
             
             process_groups_by_dim = self.mesh.swapdims(-1, dim).reshape(-1, self.mesh.size(dim))
-            self.process_groups[dim_name] = list(process_groups_by_dim.flatten())
+            # self.process_groups[dim_name] = list(process_groups_by_dim.flatten())
             
             for mesh_dim in process_groups_by_dim:
                 subgroup_ranks = mesh_dim.tolist()
