@@ -37,7 +37,9 @@ class PipelineTrainer:
         self.device = device
         self.optimizer = optimizer
         self.max_grad_norm = max_grad_norm
-        
+        self.is_first_stage = (pp_rank == 0)
+        self.is_last_stage = (pp_rank == dist.get_world_size(group=pp_group) - 1)
+
         self.device_mesh = device_mesh
         self.rank = pp_rank
         self.world_size = dist.get_world_size(group=pp_group)

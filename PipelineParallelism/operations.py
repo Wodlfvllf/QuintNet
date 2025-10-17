@@ -148,13 +148,23 @@ STEP = 0
 VERBOSE = os.environ.get("VERBOSE", "0") == "1"
 
 
-def pipeline_communicate(operation, pgm, device, dtype, tensor=None, shapes=None):
+def pipeline_communicate(operation, 
+                         pp_group,
+                         pp_rank,
+                         device, 
+                         dtype,
+                         is_first_stage=False,
+                         is_last_stage=False,
+                         tensor=None, 
+                         shapes=None
+                         ):
     """
     Handles unidirectional communication between pipeline stages.
     
     Args:
         operation: One of ['recv_forward', 'send_forward', 'recv_backward', 'send_backward']
-        pgm: ProcessGroupManager instance
+        pp_group: Pipeline parallel process group
+        pp_rank: Rank within the pipeline parallel group
         device: Device to allocate tensors on
         dtype: Data type for tensors
         tensor: Tensor to send (for send operations)
@@ -166,32 +176,29 @@ def pipeline_communicate(operation, pgm, device, dtype, tensor=None, shapes=None
     global STEP
     global VERBOSE
     
-    pp_group = pgm.get_pp_group()
-    pp_rank = pgm.get_pp_rank()
-    
     if operation == 'recv_forward':
         # First stage receives input from dataloader, not from previous stage
-        if pgm.is_first_stage():
+        if is_first_stage:
             return None
         tensor = torch.empty(shapes, requires_grad=True, device=device, dtype=dtype)
         src = pgm.get_prev_rank()
         
     elif operation == 'send_forward':
         # Last stage doesn't send forward activations (outputs loss instead)
-        if pgm.is_last_stage():
+        if is_last_stage:
             return
         dest = pgm.get_next_rank()
         
     elif operation == 'recv_backward':
         # Last stage doesn't receive backward gradients (computes loss gradient)
-        if pgm.is_last_stage():
+        if is_last_stage:
             return None
         tensor = torch.empty(shapes, requires_grad=True, device=device, dtype=dtype)
         src = pgm.get_next_rank()
         
     elif operation == 'send_backward':
         # First stage doesn't send backward gradients
-        if pgm.is_first_stage():
+        if is_first_stage:
             return
         dest = pgm.get_prev_rank()
     else:
@@ -228,14 +235,15 @@ def pipeline_communicate(operation, pgm, device, dtype, tensor=None, shapes=None
     return tensor if not is_send else None
 
 
-def bidirectional_pipeline_communicate(operation, pgm, send_tensor, recv_shapes, device, dtype):
+def bidirectional_pipeline_communicate(operation, pp_group, pp_rank, send_tensor, recv_shapes, device, dtype):
     """
     Handles bidirectional communication between pipeline stages (send and recv simultaneously).
     Used in 1F1B schedule to overlap forward and backward communications.
     
     Args:
         operation: One of ['send_fwd_recv_bwd', 'send_bwd_recv_fwd']
-        pgm: ProcessGroupManager instance
+        pp_group: Pipeline parallel process group
+        pp_rank: Rank within the pipeline parallel group
         send_tensor: Tensor to send
         recv_shapes: Shape tuple for receiving tensor
         device: Device to allocate tensors on
@@ -247,17 +255,14 @@ def bidirectional_pipeline_communicate(operation, pgm, send_tensor, recv_shapes,
     global STEP
     global VERBOSE
     
-    pp_group = pgm.get_pp_group()
-    pp_rank = pgm.get_pp_rank()
-    
     is_fwd = (operation == 'send_fwd_recv_bwd')
     
     # Boundary conditions: first/last stages don't do bidirectional communication
-    if (is_fwd and pgm.is_last_stage()) or (not is_fwd and pgm.is_first_stage()):
+    if (is_fwd and pp_rank == dist.get_world_size(group=pp_group) - 1) or (not is_fwd and pp_rank == 0):
         return None
     
     # Determine peer rank based on operation
-    peer_rank = pgm.get_next_rank() if is_fwd else pgm.get_prev_rank()
+    peer_rank = pp_rank + 1 if is_fwd else pp_rank - 1
     
     # Allocate receive buffer
     recv_tensor = torch.empty(recv_shapes, requires_grad=True, device=device, dtype=dtype)
