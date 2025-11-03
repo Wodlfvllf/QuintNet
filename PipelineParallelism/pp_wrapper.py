@@ -33,7 +33,7 @@ class PipelineParallelWrapper(nn.Module):
         self.group = pp_group
         self.is_first_stage = (self.rank == 0)
         self.is_last_stage = (self.rank == self.world_size-1)
-        
+        self.tensor_shapes = None
         # Get model depth (number of transformer blocks)
         self.depth = len(model.blocks)
         
@@ -86,17 +86,26 @@ class PipelineParallelWrapper(nn.Module):
         # First stage: add embedding
         if self.is_first_stage:
             modules.append(model.embedding)
-        
+            self.tensor_shapes = model.embedding.batch_size, model.embedding.in_channels, model.embedding.img_size, model.embedding.img_size
+
+
         # All stages: add assigned transformer blocks
         for block_idx in self.layer_distribution:
             modules.append(model.blocks[block_idx])
+            self.tensor_shapes = model.blocks[block_idx].hidden_dim, model.blocks[block_idx].n_heads
         
         # Last stage: add classification head
         if self.is_last_stage:
             modules.append(model.classification_head)
         
         return nn.Sequential(*modules)
-    
+
+    def _get_tensor_shapes(self, batch_size):
+        "For each module we need what is the optimum tensor shape that each pp stage should have as an input"
+        return self.tensor_shapes
+            
+
+
     def forward(self, x):
         """
         Forward pass through this pipeline stage.
