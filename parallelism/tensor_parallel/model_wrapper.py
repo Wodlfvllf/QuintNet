@@ -8,8 +8,8 @@ to tensor parallel versions by replacing linear layers with their parallel equiv
 import torch
 import torch.nn as nn
 import torch.distributed as dist
-from .processgroup import ProcessGroupManager
-from .layers import ColumnParallelLinear, RowParallelLinear
+
+from QuintNet.parallelism.tensor_parallel.layers import ColumnParallelLinear, RowParallelLinear
 
 
 def apply_tensor_parallel(model: nn.Module, 
