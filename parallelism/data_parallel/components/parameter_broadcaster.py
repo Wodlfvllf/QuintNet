@@ -2,8 +2,8 @@
 
 import torch.nn as nn
 
-from ..backends.base import DistributedBackend
-from ..core.config import DistributedConfig
+from QuintNet.parallelism.data_parallel.backends.base import DistributedBackend
+from QuintNet.parallelism.data_parallel.core.config import DistributedConfig
 
 class ParameterBroadcaster:
     """Handles parameter broadcasting."""
