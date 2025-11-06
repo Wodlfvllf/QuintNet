@@ -18,9 +18,9 @@ import os
 from datetime import timedelta
 
 # Import from utilities package  
-from ..utilities.utils import *
-from ..utilities.Dataloader import CustomDataset, mnist_transform
-from ..utilities.model import Attention, Model, PatchEmbedding, MLP
+from QuintNet.utils.utils import *
+from QuintNet.utils.Dataloader import CustomDataset, mnist_transform
+from QuintNet.utils.model import Attention, Model, PatchEmbedding, MLP
 from QuintNet.DataParallelsim import CustomDDP
 
 
