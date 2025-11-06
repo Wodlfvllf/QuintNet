@@ -14,12 +14,14 @@ import random
 import sys
 
 # Import from utilities package  
-from ..utilities.utils import *
-from ..utilities.Dataloader import CustomDataset, mnist_transform
-from ..utilities.model import Attention, Model, PatchEmbedding, MLP
+from QuintNet.utils.utils import *
+from QuintNet.utils.Dataloader import CustomDataset, mnist_transform
+from QuintNet.utils.model import Attention, Model, PatchEmbedding, MLP
 
 # Import tensor parallelism components
-from QuintNet.TensorParallelism import All_Gather, ColumnParallelLinear, apply_tensor_parallel, ProcessGroupManager
+from QuintNet.parallelism.tensor_parallel import All_Gather, ColumnParallelLinear, apply_tensor_parallel
+from QuintNet.core import init_mesh
+
 
 
 
@@ -337,9 +339,12 @@ def main():
         depth=4
     ).to(device)
     
+    # Create mesh for communication
+    device_mesh = init_mesh(mesh_dim=(1, world_size, 1), mesh_name=('dp', 'tp', 'pp'))
+    tp_group = device_mesh.get_group('tp')
+    
     # Apply tensor parallelism
-    tp_size = world_size   # using all GPUs for tensor parallelism
-    model = apply_tensor_parallel(model, tp_size, method_of_parallelism="column")
+    model = apply_tensor_parallel(model, world_size, rank, tp_group, device, method_of_parallelism="column")
     
     # Force enable gradients on all parameters
     for param in model.parameters():
