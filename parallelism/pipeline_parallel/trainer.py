@@ -5,7 +5,7 @@ Pipeline Parallel Trainer with AFAB and 1F1B schedules - WITH ACCURACY TRACKING
 import torch
 import torch.nn.functional as F
 import torch.distributed as dist
-from .operations import pipeline_communicate, bidirectional_pipeline_communicate
+from QuintNet.core.communication import pipeline_communicate, bidirectional_pipeline_communicate
 
 
 class PipelineTrainer:
