@@ -1,7 +1,5 @@
-"""
-Utilities for Data Parallelism.
+"""Utility functions and factory methods."""
 
-Migration Source: QuintNet/DataParallelsim/utils/
-"""
+from .factory import create_local_ddp, create_distributed_ddp
 
-__all__ = []
+__all__ = ["create_local_ddp", "create_distributed_ddp"]
