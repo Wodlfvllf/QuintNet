@@ -13,22 +13,17 @@ import time
 import numpy as np
 import random
 import os
-import sys
 
-# Add parent directory to path for imports
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # Import from utilities
-from utilities.utils import *
-from utilities.Dataloader import CustomDataset, mnist_transform
-from utilities.model import Model
+from QuintNet.utils.utils import *
+from QuintNet.utils.Dataloader import CustomDataset, mnist_transform
+from QuintNet.utils.model import Model
 
 # Import pipeline parallelism components
-from QuintNet.PipelineParallelism import (
-    ProcessGroupManager,
-    PipelineParallelWrapper,
-    PipelineTrainer
-)
+from QuintNet.parallelism.pipeline_parallel import PipelineParallelWrapper, PipelineTrainer
+from QuintNet.core import init_mesh
+
 
 
 class PipelineDataLoader:
@@ -143,11 +138,13 @@ def validate(pipeline_trainer, val_loader, tensor_shapes, device, dtype, rank, p
     return val_loss, val_acc
 
 
-def train_model(config, pgm):
+def train_model(config, device_mesh):
     """Main training function with accuracy tracking."""
-    rank = pgm.get_pp_rank()
-    pp_size = pgm.get_pp_world_size()
-    pp_group = pgm.get_pp_group()
+    rank = dist.get_rank()
+    coords = device_mesh.get_coordinates_tensor_search(rank)
+    pp_rank = coords[1]
+    pp_size = device_mesh.mesh_dim[1]
+    pp_group = device_mesh.get_group('pp')
     device = torch.device(f"cuda:{rank}")
     
     if rank == 0:
@@ -218,7 +215,7 @@ def train_model(config, pgm):
     synchronize_model_weights(model, rank, pp_group)
     
     # Create pipeline wrapper
-    pp_model = PipelineParallelWrapper(model, pgm).to(device)
+    pp_model = PipelineParallelWrapper(model, device_mesh, pp_rank, pp_group, pp_size, device).to(device)
     
     # Create optimizer and criterion
     optimizer = optim.Adam(pp_model.parameters(), lr=config['learning_rate'])
@@ -346,9 +343,10 @@ def main():
     global_rank = dist.get_rank()
     torch.cuda.set_device(global_rank)
     
-    # Create process group manager
-    pp_size = int(os.environ.get("PP_SIZE", 2))
-    pgm = ProcessGroupManager(pp_size=pp_size, tp_size=1)
+
+    # Create mesh for communication
+    world_size = dist.get_world_size()
+    device_mesh = init_mesh(mesh_dim=(1, world_size, 1), mesh_name=('dp', 'pp', 'tp'))
     
     # Configuration
     config = {
@@ -371,14 +369,14 @@ def main():
     
     # Train
     start_time = time.time()
-    train_model(config, pgm)
+    train_model(config, device_mesh)
     
-    if pgm.get_pp_rank() == 0:
+    if dist.get_rank() == 0:
         elapsed = time.time() - start_time
         print(f"\nTotal time: {elapsed//60:.0f}m {elapsed%60:.0f}s")
     
     # Cleanup
-    dist.barrier(group=pgm.get_pp_group())
+    dist.barrier(group=device_mesh.get_group('pp'))
     dist.destroy_process_group()
 
 
