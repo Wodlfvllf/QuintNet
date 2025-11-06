@@ -1,59 +1,78 @@
-"""
-Custom Distributed Data Parallel Implementation.
+"""Main CustomDDP implementation."""
 
-Migration Source: QuintNet/DataParallelsim/core/ddp.py
-"""
-
-import torch
 import torch.nn as nn
-from typing import Optional
+from typing import Optional, List, Tuple
 
-
-class DataParallel:
-    """
-    Wrapper class for data parallel training.
-    
-    TODO: Migrate from QuintNet/DataParallelsim/
-    """
-    pass
-
+from ..backends.base import DistributedBackend
+from ..backends.torch_backend import TorchDistributedBackend
+from ..components.bucket_manager import BucketManager
+from ..components.gradient_reducer import GradientReducer
+from ..components.parameter_broadcaster import ParameterBroadcaster
+from .config import DistributedConfig, BucketConfig, ReductionStrategy
 
 class CustomDDP(nn.Module):
     """
-    Custom implementation of DistributedDataParallel.
-    
-    Features:
-    - Gradient bucketing
-    - Asynchronous all-reduce
-    - Memory optimization
-    
-    TODO: Migrate from QuintNet/DataParallelsim/core/ddp.py
+    Modular custom DDP implementation with pluggable components.
     """
     
     def __init__(
         self,
-        module: nn.Module,
-        process_group: Optional[torch.distributed.ProcessGroup] = None,
-        bucket_cap_mb: float = 25.0,
-        find_unused_parameters: bool = False,
-        broadcast_buffers: bool = True,
-        gradient_as_bucket_view: bool = False
+        model: nn.Module,
+        distributed_config: Optional[DistributedConfig] = None,
+        bucket_config: Optional[BucketConfig] = None,
+        backend: Optional[DistributedBackend] = None,
+        reduction_strategy: ReductionStrategy = ReductionStrategy.MEAN,
     ):
-        """
-        Initialize CustomDDP wrapper.
-        
-        Args:
-            module: Model to wrap
-            process_group: Process group for communication
-            bucket_cap_mb: Bucket size for gradient reduction (MB)
-            find_unused_parameters: Whether to find unused parameters
-            broadcast_buffers: Whether to broadcast buffers
-            gradient_as_bucket_view: Use gradient as bucket view for memory efficiency
-        """
         super().__init__()
-        # TODO: Implement initialization
-        pass
+        
+        self.model = model
+        self.distributed_config = distributed_config or DistributedConfig()
+        self.bucket_config = bucket_config or BucketConfig()
+        self.backend = backend or TorchDistributedBackend()
+        
+        # Initialize components
+        self.bucket_manager = BucketManager(self.bucket_config)
+        self.gradient_reducer = GradientReducer(self.backend, self.distributed_config, reduction_strategy)
+        self.parameter_broadcaster = ParameterBroadcaster(self.backend, self.distributed_config)
+        
+        # Setup
+        self._setup()
+    
+    def _setup(self) -> None:
+        """Initialize the DDP wrapper."""
+        # Create buckets
+        self.buckets = self.bucket_manager.create_buckets(self.model)
+        
+        # Broadcast parameters
+        self.parameter_broadcaster.broadcast_parameters(self.model)
+        
+        # Register hooks if using bucketed gradients
+        if self.buckets:
+            self.bucket_manager.register_hooks(self._on_bucket_ready)
+    
+    def _on_bucket_ready(self, bucket_id: int) -> None:
+        """Callback when a bucket is ready for reduction."""
+        bucket = self.buckets[bucket_id]
+        bucket.is_ready = True
+        
+        if bucket.has_gradients():
+            self.gradient_reducer.reduce_bucket(bucket)
     
     def forward(self, *args, **kwargs):
-        """TODO: Implement forward pass with gradient reduction."""
-        pass
+        """Forward pass through the wrapped model."""
+        return self.model(*args, **kwargs)
+    
+    def remove_hooks(self) -> None:
+        """Remove all gradient hooks."""
+        self.bucket_manager.remove_all_hooks()
+    
+    def get_bucket_info(self) -> List[Tuple[int, int, float]]:
+        """Get information about gradient buckets."""
+        return self.bucket_manager.get_bucket_info()
+    
+    def __del__(self):
+        """Cleanup hooks when object is destroyed."""
+        try:
+            self.remove_hooks()
+        except:
+            pass
