@@ -2,9 +2,9 @@
 
 import torch.distributed as dist
 
-from ..backends.base import DistributedBackend
-from ..core.config import DistributedConfig, ReductionStrategy
-from .bucket import GradientBucket
+from QuintNet.parallelism.data_parallel.backends.base import DistributedBackend
+from QuintNet.parallelism.data_parallel.core.config import DistributedConfig, ReductionStrategy
+from QuintNet.parallelism.data_parallel.components.bucket import GradientBucket
 
 class GradientReducer:
     """Handles gradient reduction operations."""
