@@ -1,7 +1,7 @@
 """Distributed backends for CustomDDP."""
 
-from .base import DistributedBackend
-from .torch_backend import TorchDistributedBackend
-from .local_backend import LocalBackend
+from QuintNet.parallelism.data_parallel.backends.base import DistributedBackend
+from QuintNet.parallelism.data_parallel.backends.torch_backend import TorchDistributedBackend
+from QuintNet.parallelism.data_parallel.backends.local_backend import LocalBackend
 
 __all__ = ["DistributedBackend", "TorchDistributedBackend", "LocalBackend"]
