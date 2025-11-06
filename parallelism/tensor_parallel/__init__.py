@@ -1,39 +1,25 @@
 """
-Tensor Parallelism Implementation.
+TensorParallelism package for distributed tensor parallel training.
 
-This module contains:
-- Parallel layers (Column, Row)
-- Communication operations (All-Gather, Reduce-Scatter)
-- Model transformation utilities
-
-Migration Source: QuintNet/TensorParallelism/
+This package provides utilities for tensor parallelism including:
+- Communication operations (All_Gather, All_Reduce, ReduceScatter)
+- Parallel layers (ColumnParallelLinear, RowParallelLinear, VocabParallelEmbedding)
+- Model rewriting utilities
+- Process group management
 """
 
-from QuintNet.parallelism.tensor_parallel.layers import (
-    ColumnParallelLinear,
-    RowParallelLinear,
-    TensorParallel
-)
-from QuintNet.parallelism.tensor_parallel.operations import (
-    all_gather_tensor,
-    reduce_scatter_tensor,
-    all_reduce_tensor
-)
-from QuintNet.parallelism.tensor_parallel.model_wrapper import apply_tensor_parallel
-from QuintNet.parallelism.tensor_parallel.process_group import ProcessGroupManager as TPProcessGroupManager
+from .comm_ops import All_Gather, All_Reduce, ReduceScatter
+from .layers import ColumnParallelLinear, RowParallelLinear, VocabParallelEmbedding
+from .rewrite import apply_tensor_parallel
+from .processgroup import ProcessGroupManager
 
 __all__ = [
-    # Layers
+    'All_Gather',
+    'All_Reduce', 
+    'ReduceScatter',
     'ColumnParallelLinear',
     'RowParallelLinear',
-    'TensorParallel',
-    
-    # Operations
-    'all_gather_tensor',
-    'reduce_scatter_tensor',
-    'all_reduce_tensor',
-    
-    # Utilities
+    'VocabParallelEmbedding',
     'apply_tensor_parallel',
-    'TPProcessGroupManager',
+    'ProcessGroupManager'
 ]
