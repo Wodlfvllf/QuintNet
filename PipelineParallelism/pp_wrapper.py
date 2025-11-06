@@ -84,15 +84,27 @@ class PipelineParallelWrapper(nn.Module):
         modules = []
         
         # First stage: add embedding
+        # Determine the correct tensor shape for this stage's INPUT
         if self.is_first_stage:
+            # The first stage's input is the image itself.
+            self.tensor_shapes = (
+                model.embedding.in_channels,
+                model.embedding.img_size,
+                model.embedding.img_size
+            )
             modules.append(model.embedding)
-            self.tensor_shapes = (model.embedding.batch_size, model.embedding.in_channels, model.embedding.img_size, model.embedding.img_size)
-
+        else:
+            # Subsequent stages receive the output of the previous stage's transformer blocks.
+            # The shape is (batch_size, num_patches + 1, hidden_dim).
+            num_patches = (model.embedding.img_size // model.embedding.patch_size)**2
+            self.tensor_shapes = (
+                num_patches + 1,
+                model.blocks[0].hidden_dim # Assuming hidden_dim is consistent
+            )
 
         # All stages: add assigned transformer blocks
         for block_idx in self.layer_distribution:
             modules.append(model.blocks[block_idx])
-            self.tensor_shapes = (model.embedding.batch_size, model.blocks[block_idx].hidden_dim, model.blocks[block_idx].n_heads)
         
         # Last stage: add classification head
         if self.is_last_stage:
@@ -100,9 +112,9 @@ class PipelineParallelWrapper(nn.Module):
         
         return nn.Sequential(*modules)
 
-    def get_tensor_shapes(self):
-        "For each module we need what is the optimum tensor shape that each pp stage should have as an input"
-        return self.tensor_shapes
+    def get_tensor_shapes(self, batch_size):
+        "Expand tensor shapes to batch size"
+        return (batch_size, *self.tensor_shapes)
             
 
 
