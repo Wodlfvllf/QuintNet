@@ -1,7 +1,7 @@
-"""
-Communication Backends for Data Parallelism.
+"""Distributed backends for CustomDDP."""
 
-Migration Source: QuintNet/DataParallelsim/backends/
-"""
+from .base import DistributedBackend
+from .torch_backend import TorchDistributedBackend
+from .local_backend import LocalBackend
 
-__all__ = []
+__all__ = ["DistributedBackend", "TorchDistributedBackend", "LocalBackend"]

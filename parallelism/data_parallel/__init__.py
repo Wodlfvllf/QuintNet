@@ -1,28 +1,19 @@
 """
-Data Parallelism Implementation.
-
-This module contains:
-- Custom DDP implementation
-- Gradient bucketing and reduction
-- Parameter broadcasting
-- Synchronization utilities
-
-Migration Source: QuintNet/DataParallelsim/
+CustomDDP: A modular distributed data parallel implementation.
 """
 
-from QuintNet.parallelism.data_parallel.ddp import DataParallel, CustomDDP
-from QuintNet.parallelism.data_parallel.components import (
-    Bucket,
-    BucketManager,
-    GradientReducer,
-    ParameterBroadcaster
-)
+from .core.ddp import CustomDDP
+from .core.config import DistributedConfig, BucketConfig, ReductionStrategy
+from .utils.factory import create_local_ddp, create_distributed_ddp
 
+# Main exports
 __all__ = [
-    'DataParallel',
-    'CustomDDP',
-    'Bucket',
-    'BucketManager',
-    'GradientReducer',
-    'ParameterBroadcaster',
+    "CustomDDP",
+    "DistributedConfig", 
+    "BucketConfig",
+    "ReductionStrategy",
+    "create_local_ddp",
+    "create_distributed_ddp",
 ]
+
+__version__ = "0.1.0"
