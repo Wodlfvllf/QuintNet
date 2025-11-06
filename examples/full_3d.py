@@ -16,28 +16,19 @@ import sys
 from torch.utils.data.distributed import DistributedSampler
 from ..tests import run_all_tests
 
-# Add parent directory to path for imports
-# sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-# Import from utilities
-from utilities.utils import *
-from utilities.Dataloader import CustomDataset, mnist_transform
-from utilities.model import Model
 
-# Import tensor parallelism components
-from QuintNet.TensorParallelism import All_Gather, ColumnParallelLinear, apply_tensor_parallel, ProcessGroupManager
+from QuintNet.utils.utils import *
+from QuintNet.utils.Dataloader import CustomDataset, mnist_transform
+from QuintNet.utils.model import Model
 
-# Import Data parallelism components
-from QuintNet.DataParallelsim import CustomDDP
+# Import parallelism components
+from QuintNet.parallelism.tensor_parallel import All_Gather, ColumnParallelLinear, apply_tensor_parallel
+from QuintNet.parallelism.data_parallel import CustomDDP
+from QuintNet.parallelism.pipeline_parallel import PipelineParallelWrapper, PipelineTrainer
+from QuintNet.core import init_mesh, MeshGenerator
 
-# Import pipeline parallelism components
-from QuintNet.PipelineParallelism import (
-    PipelineParallelWrapper,
-    PipelineTrainer
-)
 
-# Import From Source
-from QuintNet.src import init_mesh, MeshGenerator
 
 
 class PipelineDataLoader:
