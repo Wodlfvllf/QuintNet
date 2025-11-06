@@ -8,7 +8,7 @@ including ColumnParallelLinear, RowParallelLinear, and VocabParallelEmbedding.
 import torch
 import torch.nn as nn
 import torch.distributed as dist
-from .comm_ops import All_Gather, All_Reduce
+from QuintNet.core.communication import All_Gather, All_Reduce
 
 
 class ColumnParallelLinear(nn.Module):
