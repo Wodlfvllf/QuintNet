@@ -32,7 +32,7 @@ class DataParallelStrategy(BaseStrategy):
     Data Parallelism Strategy (DP).
     """
     def apply(self, model: nn.Module) -> nn.Module:
-        from QuintNet.parallelism.data_parallel.coordinator import DataParallelCoordinator
+        from QuintNet.coordinators.data_parallel_coordinator import DataParallelCoordinator
         
         coordinator = DataParallelCoordinator(model, self.device)
         return coordinator.parallelize()
@@ -42,7 +42,7 @@ class TensorParallelStrategy(BaseStrategy):
     Tensor Parallelism Strategy (TP).
     """
     def apply(self, model: nn.Module) -> nn.Module:
-        from QuintNet.parallelism.tensor_parallel.coordinator import TensorParallelCoordinator
+        from QuintNet.coordinators.tensor_parallel_coordinator import TensorParallelCoordinator
         
         coordinator = TensorParallelCoordinator(model, self.pg_manager, self.config, self.device)
         return coordinator.parallelize()
@@ -52,7 +52,7 @@ class PipelineParallelStrategy(BaseStrategy):
     Pipeline Parallelism Strategy (PP).
     """
     def apply(self, model: nn.Module) -> nn.Module:
-        from QuintNet.parallelism.pipeline_parallel.coordinator import PipelineParallelCoordinator
+        from QuintNet.coordinators.pipeline_parallel_coordinator import PipelineParallelCoordinator
         
         coordinator = PipelineParallelCoordinator(model, self.pg_manager, self.config, self.device)
         return coordinator.parallelize()
@@ -62,7 +62,7 @@ class DataTensorParallelStrategy(BaseStrategy):
     Data and Tensor Parallelism Strategy (DP+TP).
     """
     def apply(self, model: nn.Module) -> nn.Module:
-        from QuintNet.parallelism.hybrid.dp_tp_coordinator import DPTCoordinator
+        from QuintNet.coordinators.dp_tp_coordinator import DPTCoordinator
         
         coordinator = DPTCoordinator(model, self.pg_manager, self.config, self.device)
         return coordinator.parallelize()
@@ -72,7 +72,7 @@ class DataPipelineParallelStrategy(BaseStrategy):
     Data and Pipeline Parallelism Strategy (DP+PP).
     """
     def apply(self, model: nn.Module) -> nn.Module:
-        from QuintNet.parallelism.hybrid.dp_pp_coordinator import DPPCoordinator
+        from QuintNet.coordinators.dp_pp_coordinator import DPPCoordinator
         
         coordinator = DPPCoordinator(model, self.pg_manager, self.config, self.device)
         return coordinator.parallelize()
@@ -82,7 +82,7 @@ class TensorPipelineParallelStrategy(BaseStrategy):
     Tensor and Pipeline Parallelism Strategy (TP+PP).
     """
     def apply(self, model: nn.Module) -> nn.Module:
-        from QuintNet.parallelism.hybrid.tp_pp_coordinator import TPPCoordinator
+        from QuintNet.coordinators.tp_pp_coordinator import TPPCoordinator
         
         coordinator = TPPCoordinator(model, self.pg_manager, self.config, self.device)
         return coordinator.parallelize()
@@ -92,10 +92,10 @@ class Hybrid3DStrategy(BaseStrategy):
     Full 3D Hybrid Parallelism Strategy (DP, PP, TP).
     """
     def apply(self, model: nn.Module) -> nn.Module:
-        from QuintNet.parallelism.hybrid.coordinator import HybridCoordinator
+        from QuintNet.coordinators.hybrid_3d_coordinator import Hybrid3DCoordinator
 
         # The coordinator will handle moving the model to the device
-        coordinator = HybridCoordinator(model, self.pg_manager, self.config)
+        coordinator = Hybrid3DCoordinator(model, self.pg_manager, self.config)
         return coordinator.parallelize()
 
 def get_strategy(strategy_name: str, pg_manager: ProcessGroupManager, config: Dict[str, Any]) -> BaseStrategy:
