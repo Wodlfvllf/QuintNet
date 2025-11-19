@@ -24,7 +24,7 @@ from QuintNet.utils.model import Model
 
 # Import parallelism components
 from QuintNet.core.process_groups import init_process_groups
-from QuintNet.parallelism.hybrid.strategy import get_strategy
+from QuintNet.strategy import get_strategy
 from QuintNet.parallelism.pipeline_parallel import PipelineTrainer
 
 
