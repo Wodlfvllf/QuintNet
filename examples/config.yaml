@@ -1,0 +1,24 @@
+# Training configuration
+dataset_path: /mnt/dataset/mnist/
+batch_size: 8
+num_workers: 2
+num_epochs: 10
+learning_rate: 1e-4
+grad_acc_steps: 4
+max_grad_norm: 1.0
+patience: 5
+
+# Model configuration
+img_size: 28
+patch_size: 4
+hidden_dim: 64
+in_channels: 1
+n_heads: 4
+depth: 8
+
+# Parallelism configuration
+device_type: cuda
+mesh_dim: [2, 2, 2]
+mesh_name: ['dp', 'tp', 'pp']
+strategy_name: '3d'
+schedule: '1f1b'
