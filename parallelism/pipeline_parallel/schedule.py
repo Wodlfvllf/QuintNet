@@ -1,3 +1,35 @@
+"""
+Pipeline Schedules
+
+This module defines the abstract base class for pipeline schedules and provides
+concrete implementations for common schedules like 1F1B (One-Forward-One-Backward)
+and AFAB (All-Forward-All-Backward). These schedules dictate the order and
+communication patterns of micro-batches between pipeline stages during training.
+
+===============================================================================
+CONCEPTUAL OVERVIEW:
+===============================================================================
+
+Pipeline parallelism requires breaking down a global batch into smaller
+micro-batches. These micro-batches are then processed by the pipeline stages
+in a specific order to maximize GPU utilization and minimize pipeline bubbles.
+
+- **1F1B (One-Forward-One-Backward):** After a certain number of micro-batches
+  have performed their forward pass (warm-up phase), each time a micro-batch
+  completes its forward pass, another micro-batch performs its backward pass.
+  This keeps the pipeline full.
+
+- **AFAB (All-Forward-All-Backward):** All micro-batches complete their forward
+  passes before any micro-batch begins its backward pass. This is simpler to
+  implement but generally less efficient than 1F1B.
+
+The schedule classes are closely integrated with the `PipelineTrainer` (which
+holds the model, optimizer, etc.) to execute these communication and computation
+patterns.
+
+===============================================================================
+"""
+
 import torch
 import torch.distributed as dist
 from abc import ABC, abstractmethod
@@ -5,32 +37,74 @@ from QuintNet.core.communication import pipeline_communicate, bidirectional_pipe
 
 class PipelineSchedule(ABC):
     """
-    Abstract base class for pipeline schedules.
+    Abstract base class for all pipeline schedules.
+
+    All concrete pipeline schedule implementations must inherit from this class
+    and implement the `train_step` method.
     """
     def __init__(self, trainer):
+        """
+        Initializes the PipelineSchedule.
+
+        Args:
+            trainer: An instance of `PipelineTrainer` (or a class with a
+                compatible interface) that holds the model, optimizer, etc.
+                This allows the schedule to access necessary training components.
+        """
         self.trainer = trainer
 
     @abstractmethod
     def train_step(self, data_loader, tensor_shapes, device, dtype):
+        """
+        Abstract method to execute a single training step for a pipeline schedule.
+
+        This method defines the specific sequence of forward and backward passes
+        and inter-stage communication for micro-batches.
+
+        Args:
+            data_loader: The `PipelineDataLoader` providing micro-batches.
+            tensor_shapes (tuple): The expected shapes of tensors communicated
+                between pipeline stages.
+            device (torch.device): The CUDA device.
+            dtype (torch.dtype): The data type of the tensors.
+        """
         pass
 
 class AllFwdAllBwdSchedule(PipelineSchedule):
     """
-    All-Forward-All-Backward (AFAB) schedule.
+    Implements the All-Forward-All-Backward (AFAB) pipeline schedule.
+
+    In the AFAB schedule, all micro-batches complete their forward passes
+    before any micro-batch begins its backward pass. This is simpler
+    but can lead to pipeline bubbles (idle times).
     """
     def train_step(self, data_loader, tensor_shapes, device, dtype):
-        # This is the logic from train_step_afab
+        """
+        Executes a single training step using the AFAB schedule.
+
+        All micro-batches perform their forward passes. Then, all
+        micro-batches perform their backward passes.
+
+        Args:
+            data_loader: The `PipelineDataLoader` providing micro-batches.
+            tensor_shapes (tuple): The expected shapes of tensors communicated
+                between pipeline stages.
+            device (torch.device): The CUDA device.
+            dtype (torch.dtype): The data type of the tensors.
+
+        Returns:
+            Tuple of (loss, accuracy) - only on the last rank of the pipeline.
+        """
         trainer = self.trainer
         logging_loss = 0.0
         total_correct = 0
         total_samples = 0
-        input_tensors, output_tensors = [], []
+        input_tensors, output_tensors = [], [] # Stores activations for backward pass
         grad_acc_steps = data_loader.grad_acc_steps
-        
-        trainer.batch_labels = []
         
         # ===== ALL FORWARD PASSES =====
         for _ in range(grad_acc_steps):
+            # Receive activation from the previous stage
             input_tensor = pipeline_communicate(
                 operation='recv_forward',
                 pp_group=trainer.pp_group,
@@ -42,13 +116,18 @@ class AllFwdAllBwdSchedule(PipelineSchedule):
                 shapes=tensor_shapes
             )
             
+            # Get a micro-batch from the data loader
             batch = next(data_loader)
             
+            # Perform forward pass
             if trainer.is_first_stage:
+                # First stage uses image data as input
                 output_tensor = trainer.model.forward(batch["images"].to(device))
             else:
+                # Subsequent stages use activations from previous stage
                 output_tensor = trainer.model.forward(input_tensor)
             
+            # Send activation to the next stage
             pipeline_communicate(
                 operation='send_forward',
                 pp_group=trainer.pp_group,
@@ -61,6 +140,7 @@ class AllFwdAllBwdSchedule(PipelineSchedule):
                 shapes=tensor_shapes
             )
             
+            # If this is the last stage, calculate loss and accuracy
             if trainer.is_last_stage:
                 labels = batch["labels"].to(device)
                 loss = trainer.criterion(output_tensor, labels)
@@ -70,13 +150,16 @@ class AllFwdAllBwdSchedule(PipelineSchedule):
                 total_correct += (predicted == labels).sum().item()
                 total_samples += labels.size(0)
                 
+                # The loss scalar is used as input gradient for the backward pass
                 output_tensor = loss
             
+            # Store inputs and outputs for the corresponding backward pass
             input_tensors.append(input_tensor)
             output_tensors.append(output_tensor)
         
         # ===== ALL BACKWARD PASSES =====
         for microbatch_idx in range(grad_acc_steps):
+            # Receive gradient from the next stage
             output_tensor_grad = pipeline_communicate(
                 operation='recv_backward',
                 pp_group=trainer.pp_group,
@@ -88,15 +171,19 @@ class AllFwdAllBwdSchedule(PipelineSchedule):
                 shapes=tensor_shapes
             )
             
+            # Retrieve saved inputs and outputs from the forward pass (FIFO order)
             input_tensor = input_tensors.pop(0)
             output_tensor = output_tensors.pop(0)
             
+            # Perform backward pass through the local stage
+            # The model's backward method expects saved input, output, and incoming gradient
             input_tensor_grad = trainer.model.backward(
                 input_tensor, 
                 output_tensor, 
                 output_tensor_grad
             )
             
+            # Send gradients to the previous stage
             pipeline_communicate(
                 operation='send_backward',
                 pp_group=trainer.pp_group,
@@ -109,6 +196,7 @@ class AllFwdAllBwdSchedule(PipelineSchedule):
                 shapes=tensor_shapes
             )
         
+        # Perform optimizer step after all gradients have been accumulated
         if trainer.optimizer is not None:
             if trainer.max_grad_norm > 0:
                 torch.nn.utils.clip_grad_norm_(
@@ -118,6 +206,7 @@ class AllFwdAllBwdSchedule(PipelineSchedule):
             trainer.optimizer.step()
             trainer.optimizer.zero_grad()
         
+        # Return metrics (only calculated/meaningful on the last stage)
         if trainer.is_last_stage:
             avg_loss = logging_loss / grad_acc_steps
             avg_accuracy = (total_correct / total_samples) * 100.0 if total_samples > 0 else 0.0
@@ -127,25 +216,47 @@ class AllFwdAllBwdSchedule(PipelineSchedule):
 
 class OneFOneBSchedule(PipelineSchedule):
     """
-    1F1B (one-forward-one-backward) schedule.
+    Implements the 1F1B (One-Forward-One-Backward) pipeline schedule.
+
+    In the 1F1B schedule, after a warm-up phase where only forward passes occur,
+    an equal number of forward and backward passes are performed concurrently.
+    This aims to keep the GPUs as busy as possible, significantly reducing
+    pipeline bubbles.
     """
     def train_step(self, data_loader, tensor_shapes, device, dtype):
-        # This is the logic from train_step_1f1b
+        """
+        Executes a single training step using the 1F1B schedule.
+
+        Args:
+            data_loader: The `PipelineDataLoader` providing micro-batches.
+            tensor_shapes (tuple): The expected shapes of tensors communicated
+                between pipeline stages.
+            device (torch.device): The CUDA device.
+            dtype (torch.dtype): The data type of the tensors.
+
+        Returns:
+            Tuple of (loss, accuracy) - only on the last rank of the pipeline.
+        """
         trainer = self.trainer
         grad_acc_steps = data_loader.grad_acc_steps
         
+        # Calculate the number of micro-batches for warm-up and steady state
+        # The warm-up phase involves only forward passes to fill the pipeline.
         num_warmup_microbatches = min(
             trainer.world_size - trainer.rank - 1,
             grad_acc_steps
         )
+        # The remaining micro-batches are processed in the steady state (1F1B)
         num_microbatches_remaining = grad_acc_steps - num_warmup_microbatches
         
         logging_loss = 0.0
         total_correct = 0
         total_samples = 0
+        # Queues to store activations/outputs for corresponding backward passes
         input_tensors, output_tensors = [], []
         
         def _forward_step(input_tensor):
+            """Helper function for performing a micro-batch forward pass."""
             batch = next(data_loader)
             
             if trainer.is_first_stage:
@@ -153,10 +264,12 @@ class OneFOneBSchedule(PipelineSchedule):
             else:
                 output_tensor = trainer.model.forward(input_tensor)
             
+            # On the last stage, calculate loss and track accuracy
             if trainer.is_last_stage:
                 labels = batch["labels"].to(device)
                 loss = trainer.criterion(output_tensor, labels)
                 
+                # nonlocal is used to modify variables in the enclosing scope
                 nonlocal logging_loss, total_correct, total_samples
                 logging_loss += loss.item()
                 
@@ -164,11 +277,12 @@ class OneFOneBSchedule(PipelineSchedule):
                 total_correct += (predicted == labels).sum().item()
                 total_samples += labels.size(0)
                 
-                output_tensor = loss
+                output_tensor = loss # The loss scalar is used as input gradient for the backward pass
             
             return output_tensor
         
         # ===== WARMUP PHASE =====
+        # Only forward passes are executed to fill the pipeline.
         for _ in range(num_warmup_microbatches):
             input_tensor = pipeline_communicate(
                 operation='recv_forward',
@@ -196,6 +310,8 @@ class OneFOneBSchedule(PipelineSchedule):
             output_tensors.append(output_tensor)
         
         # ===== STEADY STATE (1F1B) =====
+        # Forward and backward passes happen concurrently.
+        # This phase starts by receiving a forward activation from the previous stage (if any).
         if num_microbatches_remaining > 0:
             input_tensor = pipeline_communicate(
                 operation='recv_forward',
@@ -211,8 +327,10 @@ class OneFOneBSchedule(PipelineSchedule):
         for microbatch_idx in range(num_microbatches_remaining):
             is_last_iteration = (microbatch_idx == num_microbatches_remaining - 1)
             
+            # Forward pass for current micro-batch
             output_tensor = _forward_step(input_tensor)
             
+            # Bidirectional communication: send forward activation, receive backward gradient
             output_tensor_grad = bidirectional_pipeline_communicate(
                 operation='send_fwd_recv_bwd',
                 pp_group=trainer.pp_group,
@@ -226,19 +344,24 @@ class OneFOneBSchedule(PipelineSchedule):
                 shapes=tensor_shapes
             )
             
+            # Store current micro-batch's inputs/outputs for its backward pass
             input_tensors.append(input_tensor)
             output_tensors.append(output_tensor)
             
+            # Retrieve the oldest micro-batch's inputs/outputs for its backward pass (FIFO)
             input_tensor = input_tensors.pop(0)
             output_tensor = output_tensors.pop(0)
             
+            # Perform backward pass for the oldest micro-batch
             input_tensor_grad = trainer.model.backward(
                 input_tensor, 
                 output_tensor, 
                 output_tensor_grad
             )
             
+            # Handle communication for the next iteration:
             if is_last_iteration:
+                # If this is the last micro-batch, only send the final gradients backward.
                 input_tensor = None
                 pipeline_communicate(
                     operation='send_backward',
@@ -252,6 +375,7 @@ class OneFOneBSchedule(PipelineSchedule):
                     shapes=tensor_shapes
                 )
             else:
+                # Otherwise, send backward gradient and receive next forward activation concurrently.
                 input_tensor = bidirectional_pipeline_communicate(
                     operation='send_bwd_recv_fwd',
                     pp_group=trainer.pp_group,
@@ -266,10 +390,13 @@ class OneFOneBSchedule(PipelineSchedule):
                 )
         
         # ===== COOLDOWN PHASE =====
+        # Only backward passes are executed to clear the pipeline.
         for warmup_idx in range(num_warmup_microbatches):
+            # Retrieve remaining stored inputs and outputs
             input_tensor = input_tensors.pop(0)
             output_tensor = output_tensors.pop(0)
             
+            # Receive gradient from the next stage
             output_tensor_grad = pipeline_communicate(
                 operation='recv_backward',
                 pp_group=trainer.pp_group,
@@ -281,6 +408,7 @@ class OneFOneBSchedule(PipelineSchedule):
                 shapes=tensor_shapes
             )
             
+            # Perform backward pass
             input_tensor_grad = trainer.model.backward(
                 input_tensor, 
                 output_tensor, 
@@ -299,6 +427,7 @@ class OneFOneBSchedule(PipelineSchedule):
                 shapes=tensor_shapes    
             )
         
+        # Perform optimizer step after all gradients have been accumulated
         if trainer.optimizer is not None:
             if trainer.max_grad_norm > 0:
                 torch.nn.utils.clip_grad_norm_(
@@ -308,6 +437,7 @@ class OneFOneBSchedule(PipelineSchedule):
             trainer.optimizer.step()
             trainer.optimizer.zero_grad()
         
+        # Return metrics (only calculated/meaningful on the last stage)
         if trainer.is_last_stage:
             avg_loss = logging_loss / grad_acc_steps
             avg_accuracy = (total_correct / total_samples) * 100.0 if total_samples > 0 else 0.0
