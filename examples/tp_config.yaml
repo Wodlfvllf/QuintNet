@@ -1,0 +1,23 @@
+# Tensor Parallel (TP) Training Configuration
+dataset_path: /mnt/dataset/mnist/
+batch_size: 64
+num_workers: 4
+num_epochs: 10
+learning_rate: 1e-4
+grad_acc_steps: 1
+patience: 5
+
+# Model Configuration
+img_size: 28
+patch_size: 4
+hidden_dim: 64
+in_channels: 1
+n_heads: 4
+depth: 4
+
+# Parallelism Configuration
+device_type: cuda
+mesh_dim: [1, 4, 1]  # 4 GPUs for Tensor Parallelism
+mesh_name: ['dp', 'tp', 'pp']
+strategy_name: 'tp'
+schedule: '1f1b' # Not used in TP, but kept for consistency
