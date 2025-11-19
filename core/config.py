@@ -66,11 +66,24 @@ class TrainingConfig:
 
 def load_config(config_path: str) -> Dict[str, Any]:
     """
-    TODO: Implement config loading from YAML/JSON
+    Load configuration from a YAML file.
     
-    Load configuration from file.
+    Args:
+        config_path (str): The path to the YAML configuration file.
+        
+    Returns:
+        Dict[str, Any]: The loaded configuration dictionary.
     """
-    pass
+    if not os.path.exists(config_path):
+        raise FileNotFoundError(f"Config file not found at: {config_path}")
+        
+    with open(config_path, 'r') as f:
+        try:
+            config = yaml.safe_load(f)
+        except yaml.YAMLError as e:
+            raise RuntimeError(f"Error parsing YAML file: {e}")
+            
+    return config
 
 
 def merge_configs(*configs: Dict[str, Any]) -> Dict[str, Any]:
