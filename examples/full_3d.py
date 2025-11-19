@@ -21,6 +21,8 @@ from ..tests import run_all_tests
 from QuintNet.utils.utils import *
 from QuintNet.utils.Dataloader import CustomDataset, mnist_transform
 from QuintNet.utils.model import Model
+from QuintNet.core.config import load_config
+import argparse
 
 # Import parallelism components
 from QuintNet.core.process_groups import init_process_groups
@@ -403,31 +405,22 @@ def train_model(config, pg_manager):
     return metrics
 
 
+from QuintNet.core.config import load_config
+import argparse
+
+# ... (rest of the file is the same until main)
+
 def main():
+    parser = argparse.ArgumentParser(description="QuintNet 3D Parallelism Training")
+    parser.add_argument('--config', type=str, default='examples/config.yaml',
+                        help='Path to the YAML configuration file.')
+    args = parser.parse_args()
+
+    # Load configuration from YAML file
+    config = load_config(args.config)
+
     dist.init_process_group(backend="nccl")
     global_rank = dist.get_rank()    
-    
-    config = {
-        'dataset_path': os.environ.get('DATASET_PATH', '/mnt/dataset/mnist/'),
-        'batch_size': 8,
-        'num_workers': 2,
-        'img_size': 28,
-        'patch_size': 4,
-        'hidden_dim': 64,
-        'in_channels': 1,
-        'n_heads': 4,
-        'depth': 8,
-        'num_epochs': 10,
-        'learning_rate': 1e-4,
-        'grad_acc_steps': 4,
-        'max_grad_norm': 1.0,
-        'patience': 5,
-        'schedule': os.environ.get('SCHEDULE', '1f1b'),
-        'device_type': 'cuda',
-        'mesh_dim': (2, 2, 2),
-        'mesh_name': ('dp', 'tp', 'pp'),
-        'strategy_name': '3d'  # <-- CHOOSE YOUR STRATEGY HERE
-    }
     
     # Initialize the ProcessGroupManager
     pg_manager = init_process_groups(
@@ -435,8 +428,6 @@ def main():
         mesh_dim=config['mesh_dim'],
         mesh_name=config['mesh_name']
     )
-    
-    # The old run_all_tests call is removed as it was non-functional
     
     start_time = time.time()
     metrics = train_model(config, pg_manager)
