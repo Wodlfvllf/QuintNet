@@ -1,3 +1,7 @@
+"""
+Coordinator for Full 3D Hybrid Parallelism (DP + PP + TP).
+"""
+
 import torch
 import torch.nn as nn
 import torch.distributed as dist
@@ -10,7 +14,11 @@ from QuintNet.parallelism.data_parallel import CustomDDP
 
 class Hybrid3DCoordinator(BaseCoordinator):
     """
-    Coordinates the application of 3D parallelism (DP, PP, TP) to a model.
+    Coordinator for applying full 3D hybrid parallelism (DP+PP+TP).
+
+    This is the most advanced strategy, combining all three forms of parallelism.
+    It is designed for training extremely large models on large-scale, multi-node
+    GPU clusters.
     """
     def __init__(self, model: nn.Module, pg_manager: ProcessGroupManager, config: dict, **kwargs):
         """
@@ -18,16 +26,24 @@ class Hybrid3DCoordinator(BaseCoordinator):
 
         Args:
             model (nn.Module): The base model to be parallelized.
-            pg_manager (ProcessGroupManager): The process group manager for distributed communication.
-            config (dict): A configuration dictionary.
+            pg_manager (ProcessGroupManager): The process group manager.
+            config (dict): The configuration dictionary.
+            **kwargs: Catches any additional arguments.
         """
-        super().__init__(model, **kwargs)
-        self.pg_manager = pg_manager
-        self.config = config
+        super().__init__(model, pg_manager=pg_manager, config=config, **kwargs)
 
     def parallelize(self) -> nn.Module:
         """
-        Applies 3D parallelism to the model.
+        Applies 3D parallelism to the model in the correct order.
+
+        The correct order of application is:
+        1.  **Tensor Parallelism (TP):** The model's layers are first sharded
+            across the GPUs in the tensor-parallel group.
+        2.  **Pipeline Parallelism (PP):** The tensor-sharded model is then
+            split into stages across the pipeline-parallel group.
+        3.  **Data Parallelism (DP):** The entire tensor-and-pipeline-parallel
+            model is then replicated, and `CustomDDP` is used to synchronize
+            gradients across these replicas.
 
         Returns:
             nn.Module: The fully parallelized model.
@@ -44,10 +60,9 @@ class Hybrid3DCoordinator(BaseCoordinator):
         tp_rank = coords[self.config['mesh_name'].index('tp')]
         pp_rank = coords[self.config['mesh_name'].index('pp')]
         
-        # Move model to device
         self.model.to(device)
 
-        # 1. Apply Tensor Parallelism
+        # --- 1. Apply Tensor Parallelism ---
         tp_model = apply_tensor_parallel(
             self.model,
             self.config['mesh_dim'][self.config['mesh_name'].index('tp')],
@@ -59,7 +74,7 @@ class Hybrid3DCoordinator(BaseCoordinator):
             method_of_parallelism="column"
         )
 
-        # 2. Apply Pipeline Parallelism
+        # --- 2. Apply Pipeline Parallelism ---
         pp_model = PipelineParallelWrapper(
             tp_model, 
             self.pg_manager.device_mesh,
@@ -69,7 +84,7 @@ class Hybrid3DCoordinator(BaseCoordinator):
             device
         ).to(device)
 
-        # 3. Apply Data Parallelism
+        # --- 3. Apply Data Parallelism ---
         dp_model = CustomDDP(pp_model)
 
         return dp_model

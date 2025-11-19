@@ -1,7 +1,9 @@
-import torch
+"""
+Coordinator for 2D Hybrid Parallelism (TP + PP).
+"""
+
 import torch.nn as nn
 import torch.distributed as dist
-import os
 from QuintNet.coordinators.main_coordinator import BaseCoordinator
 from QuintNet.core.process_groups import ProcessGroupManager
 from QuintNet.parallelism.tensor_parallel.rewrite import apply_tensor_parallel
@@ -9,7 +11,12 @@ from QuintNet.parallelism.pipeline_parallel.wrapper import PipelineParallelWrapp
 
 class TPPCoordinator(BaseCoordinator):
     """
-    Coordinator for applying Tensor Parallelism and Pipeline Parallelism (TP+PP).
+    Coordinator for applying a 2D hybrid of Tensor and Pipeline Parallelism (TP+PP).
+
+    This is a powerful strategy for very large models that do not fit on a
+    single GPU. It combines tensor parallelism to split individual large layers
+    across GPUs, and pipeline parallelism to split the sequence of layers into
+    stages on different GPUs.
     """
     def __init__(self, model: nn.Module, pg_manager: ProcessGroupManager, config: dict, device, **kwargs):
         """
@@ -19,46 +26,52 @@ class TPPCoordinator(BaseCoordinator):
             model (nn.Module): The model to be parallelized.
             pg_manager (ProcessGroupManager): The process group manager.
             config (dict): The configuration dictionary.
-            device: The device to move the model to.
+            device: The CUDA device where the model stage will be placed.
+            **kwargs: Catches any additional arguments.
         """
-        super().__init__(model, **kwargs)
-        self.pg_manager = pg_manager
-        self.config = config
-        self.device = device
+        super().__init__(model, pg_manager=pg_manager, config=config, device=device, **kwargs)
 
     def parallelize(self) -> nn.Module:
         """
-        Applies TP+PP to the model.
+        Applies TP+PP to the model in the correct order.
+
+        The correct order of application is:
+        1.  **Tensor Parallelism (TP):** The model's layers are first sharded
+            across the GPUs in the tensor-parallel group.
+        2.  **Pipeline Parallelism (PP):** The tensor-sharded model is then
+            split into stages across the pipeline-parallel group.
 
         Returns:
-            nn.Module: The parallelized model.
+            nn.Module: The fully parallelized model.
         """
         global_rank = dist.get_rank()
         coords = self.pg_manager.get_coordinates_tensor_search(global_rank)
 
-        # 1. Apply Tensor Parallelism
+        # --- 1. Apply Tensor Parallelism ---
         tp_group = self.pg_manager.get_group('tp')
         tp_rank = coords[self.config['mesh_name'].index('tp')]
+        tp_size = self.config['mesh_dim'][self.config['mesh_name'].index('tp')]
         
         self.model.to(self.device)
         tp_model = apply_tensor_parallel(
             self.model,
-            tp_size=self.config['mesh_dim'][self.config['mesh_name'].index('tp')],
+            tp_size=tp_size,
             tp_rank=tp_rank,
             tp_group=tp_group,
             device=self.device
         )
 
-        # 2. Apply Pipeline Parallelism
+        # --- 2. Apply Pipeline Parallelism ---
         pp_group = self.pg_manager.get_group('pp')
         pp_rank = coords[self.config['mesh_name'].index('pp')]
+        pp_size = self.config['mesh_dim'][self.config['mesh_name'].index('pp')]
 
         pp_model = PipelineParallelWrapper(
             tp_model,
             self.pg_manager.device_mesh,
             pp_rank,
             pp_group,
-            pp_size=self.config['mesh_dim'][self.config['mesh_name'].index('pp')],
+            pp_size=pp_size,
             device=self.device
         )
         return pp_model
