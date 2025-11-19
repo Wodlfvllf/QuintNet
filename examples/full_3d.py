@@ -313,82 +313,32 @@ def run_pp_training_loop(
     return None
 
 
-def train_model(config, device_mesh):
-    """Main training function with accuracy tracking."""
+def train_model(config, pg_manager):
+    """Main training function that uses the strategy pattern."""
     
     global_rank = dist.get_rank()
     local_rank = int(os.environ["LOCAL_RANK"])
     device = torch.device(f"cuda:{local_rank}")
 
-    # Get all the necessary info from the mesh
-    dp_group = device_mesh.get_group('dp')
-    tp_group = device_mesh.get_group('tp')
-    pp_group = device_mesh.get_group('pp')
-
-    coords = device_mesh.get_coordinates_tensor_search(global_rank)
-    dp_rank = coords[0]  # Assuming mesh order is ('dp', 'tp', 'pp')
-    tp_rank = coords[1]
-    pp_rank = coords[2]
-    pp_size = config['mesh_dim'][2]
-    dp_size = config['mesh_dim'][0]
+    # Get rank information from the process group manager
+    coords = pg_manager.get_coordinates_tensor_search(global_rank)
+    dp_rank = coords[config['mesh_name'].index('dp')]
+    pp_rank = coords[config['mesh_name'].index('pp')]
+    pp_size = config['mesh_dim'][config['mesh_name'].index('pp')]
+    dp_size = config['mesh_dim'][config['mesh_name'].index('dp')]
+    pp_group = pg_manager.get_group('pp')
         
-    # Set seeds
     set_seed(42)
     
-    # Load datasets
-    train_dataset = CustomDataset(
-        config['dataset_path'],
-        split='train',
-        transform=mnist_transform
-    )
-    val_dataset = CustomDataset(
-        config['dataset_path'],
-        split='test',
-        transform=mnist_transform
-    )
+    # Dataloader setup (remains the same)
+    train_dataset = CustomDataset(config['dataset_path'], split='train', transform=mnist_transform)
+    val_dataset = CustomDataset(config['dataset_path'], split='test', transform=mnist_transform)
+    train_sampler = DistributedSampler(train_dataset, num_replicas=dp_size, rank=dp_rank, shuffle=True, seed=42)
+    val_sampler = DistributedSampler(val_dataset, num_replicas=dp_size, rank=dp_rank, shuffle=False, seed=42)
+    train_loader = DataLoader(train_dataset, batch_size=config['batch_size'], sampler=train_sampler, num_workers=config['num_workers'], drop_last=True, pin_memory=True)
+    val_loader = DataLoader(val_dataset, batch_size=config['batch_size'], sampler=val_sampler, num_workers=config['num_workers'], drop_last=False, pin_memory=True)
     
-    # Create dataloaders
-    def worker_init_fn(worker_id):
-        set_seed(42 + worker_id)
-
-
-    train_sampler = DistributedSampler(
-        train_dataset,
-        num_replicas=dp_size,
-        rank=dp_rank,
-        shuffle=True,
-        seed=42
-    )
-    val_sampler = DistributedSampler(
-        val_dataset,
-        num_replicas=dp_size,
-        rank=dp_rank,
-        shuffle=False,
-        seed=42
-    )
-    
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=config['batch_size'],
-        sampler=train_sampler,
-        num_workers=config['num_workers'],
-        worker_init_fn=worker_init_fn,
-        persistent_workers=True if config['num_workers'] > 0 else False,
-        generator=torch.Generator().manual_seed(42),
-        drop_last=True,
-        pin_memory=True
-    )
-    
-    val_loader = DataLoader(
-        val_dataset,
-        batch_size=config['batch_size'],
-        sampler=val_sampler,
-        num_workers=config['num_workers'],
-        drop_last=False,
-        pin_memory=True
-    )
-    
-    # Create model
+    # Create the base model
     model = Model(
         img_size=config['img_size'],
         patch_size=config['patch_size'],
@@ -396,51 +346,26 @@ def train_model(config, device_mesh):
         in_channels=config['in_channels'],
         n_heads=config['n_heads'],
         depth=config['depth']
-    ).to(device)
+    )
     
     if global_rank == 0:
         total_params = sum(p.numel() for p in model.parameters())
         print(f"Total model parameters: {total_params:,}\n")
     
-    # Synchronize weights across pipeline stages
-    # synchronize_model_weights(model, pp_group)
-    
-    # Initialize Tensor parallelism
-    tp_model = apply_tensor_parallel(
-        model, 
-        config['mesh_dim'][1], 
-        tp_rank,
-        tp_group,
-        device,
-        gather_output=True, 
-        sync_gradients=True, 
-        method_of_parallelism="column"
-    )
-    
-    # Create pipeline wrapper
-    pp_model = PipelineParallelWrapper(
-        tp_model, 
-        device_mesh,
-        pp_rank,
-        pp_group,
-        config['mesh_dim'][2],
-        device
-    ).to(device)
-    
-    # Initialize DDP
-    dp_model = CustomDDP(pp_model)
-    
-    # Create optimizer and criterion
-    optimizer = optim.Adam(dp_model.parameters(), lr=config['learning_rate'])
+    # === STRATEGY-BASED PARALLELIZATION ===
+    # 1. Get the strategy object from the factory
+    strategy = get_strategy(config['strategy_name'], pg_manager, config)
+    # 2. Apply the strategy to the model
+    parallel_model = strategy.apply(model)
+    # ========================================
+
+    optimizer = optim.Adam(parallel_model.parameters(), lr=config['learning_rate'])
     criterion = nn.CrossEntropyLoss()
     
-    data_loader_for_training = train_loader
-    
-    if config['mesh_dim'][2] > 1:
-        # Create pipeline trainer
+    if pp_size > 1:
         pipeline_trainer = PipelineTrainer(
-            dp_model,
-            device_mesh,
+            parallel_model,
+            pg_manager.device_mesh,
             pp_rank,
             pp_group,
             criterion,
@@ -448,19 +373,16 @@ def train_model(config, device_mesh):
             optimizer=optimizer,
             max_grad_norm=config['max_grad_norm']
         )
-        # Create pipeline dataloader
         data_loader_for_training = PipelineDataLoader(train_loader, config['grad_acc_steps'])
+        
+        # Access the underlying pipeline wrapper to get tensor shapes
+        # Note: This assumes the model is wrapped in DDP, then PP.
+        pipeline_wrapper = parallel_model.module.module
+        tensor_shapes = pipeline_wrapper.get_tensor_shapes(config['batch_size'])
+
         metrics = run_pp_training_loop(
-            config,
-            pipeline_trainer,
-            data_loader_for_training,
-            val_loader,
-            pp_model.get_tensor_shapes(config['batch_size']),
-            torch.float32,
-            device,
-            pp_rank,
-            pp_size,
-            pp_group
+            config, pipeline_trainer, data_loader_for_training, val_loader,
+            tensor_shapes, torch.float32, device, pp_rank, pp_size, pp_group
         )
     else:
         # Standard DDP training loop
@@ -469,31 +391,22 @@ def train_model(config, device_mesh):
                 print(f"\nEpoch {epoch+1}/{config['num_epochs']}\n" + "-" * 50)
             
             train_loss, train_acc = train_epoch_without_pp(
-                dp_model,
-                train_loader,
-                criterion,
-                optimizer,
-                device,
-                global_rank
+                parallel_model, train_loader, criterion, optimizer, device, global_rank
             )
             
             if global_rank == 0:
                 print(f"\nEpoch {epoch+1} Results (Rank {global_rank}):")
                 print(f"  Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.2f}%")
                 print(f"{'='*50}\n")
-        
         metrics = None
         
     return metrics
 
 
 def main():
-    # Initialize distributed
     dist.init_process_group(backend="nccl")
-    
     global_rank = dist.get_rank()    
     
-    # Configuration
     config = {
         'dataset_path': os.environ.get('DATASET_PATH', '/mnt/dataset/mnist/'),
         'batch_size': 8,
@@ -512,27 +425,26 @@ def main():
         'schedule': os.environ.get('SCHEDULE', '1f1b'),
         'device_type': 'cuda',
         'mesh_dim': (2, 2, 2),
-        'mesh_name': ('dp', 'tp', 'pp')
+        'mesh_name': ('dp', 'tp', 'pp'),
+        'strategy_name': '3d'  # <-- CHOOSE YOUR STRATEGY HERE
     }
     
-    # Create mesh for effective communication
-    device_mesh = init_mesh(
+    # Initialize the ProcessGroupManager
+    pg_manager = init_process_groups(
         device_type=config['device_type'],
         mesh_dim=config['mesh_dim'],
         mesh_name=config['mesh_name']
     )
     
-    run_all_tests(device_mesh)
+    # The old run_all_tests call is removed as it was non-functional
     
-    # Train
     start_time = time.time()
-    metrics = train_model(config, device_mesh)
+    metrics = train_model(config, pg_manager)
     
     if global_rank == 0 and metrics is not None:
         elapsed_time = time.time() - start_time
         print(f"\nTotal training time: {elapsed_time:.2f} seconds")
     
-    # Cleanup
     dist.barrier()
     dist.destroy_process_group()
 
