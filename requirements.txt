@@ -13,3 +13,4 @@ accelerate
 safetensors
 matplotlib
 scipy
+PyYAML
