@@ -1,3 +1,119 @@
+"""
+Distributed Mesh Management
+
+This module provides the `MeshGenerator` class, which is central to defining
+and managing the distributed topology (device mesh) for hybrid parallelism
+strategies in QuintNet. It handles the creation of communication process groups
+for Data Parallelism (DP), Pipeline Parallelism (PP), and Tensor Parallelism (TP).
+
+===============================================================================
+CONCEPTUAL OVERVIEW:
+===============================================================================
+
+A "device mesh" is a logical N-dimensional grid that maps global ranks to
+specific roles within different parallelism dimensions. For example, in a
+3D mesh (DP, PP, TP), each global rank has a unique coordinate (dp_coord, pp_coord, tp_coord).
+
+The `MeshGenerator` performs the following key functions:
+1.  **Initializes Distributed Backend**: Ensures `torch.distributed` is set up.
+2.  **Creates Process Groups**: Based on the defined `mesh_dim` and `mesh_name`,
+    it creates distinct `torch.distributed.ProcessGroup` objects for each
+    parallelism dimension (DP, PP, TP). A rank belongs to one DP group, one PP group,
+    and one TP group.
+3.  **Coordinate Lookup**: Provides methods to find a global rank's coordinates
+    within the mesh, which is crucial for determining its role in communication.
+
+This module is a foundational piece for any distributed training setup in QuintNet,
+as it establishes the communication infrastructure.
+
+===============================================================================
+EXAMPLES OF HOW THE MESH WORKS:
+===============================================================================
+
+Example 1: Basic 3D Mesh with mesh_dim=(2, 2, 2)
+------------------------------------------------
+When you call: `init_mesh(mesh_dim=(2, 2, 2), mesh_name=('dp', 'pp', 'tp'))`
+
+The mesh tensor looks like this (3D array of global ranks):
+
+       PP dimension (axis 1) →
+       ┌─────┬─────┐
+  DP   │ 0 1 │ 2 3 │  ← TP dimension (axis 2)
+  dim  ├─────┼─────┤
+  ↓    │ 4 5 │ 6 7 │
+       └─────┴─────┘
+
+Written as a 3D tensor:
+tensor([[[0, 1],   # dp=0, pp=0, tp=0-1
+         [2, 3]],  # dp=0, pp=1, tp=0-1
+
+        [[4, 5],   # dp=1, pp=0, tp=0-1
+         [6, 7]]]) # dp=1, pp=1, tp=0-1
+
+Process Groups Created (for a specific rank, e.g., global rank 6):
+-----------------------
+-   **DP group for rank 6**: [2, 6] (ranks that share pp=1, tp=0)
+-   **PP group for rank 6**: [4, 6] (ranks that share dp=1, tp=0)
+-   **TP group for rank 6**: [6, 7] (ranks that share dp=1, pp=1)
+
+===============================================================================
+
+Example 2: Larger Mesh with mesh_dim=(4, 2, 2)
+-----------------------------------------------
+4 DP replicas, 2 PP stages, 2 TP shards = 16 total GPUs
+
+mesh tensor shape: (4, 2, 2)
+Ranks 0-15 arranged as:
+
+        PP=0      PP=1
+     ┌──┬──┐  ┌──┬──┐
+DP=0 │ 0│ 1│  │ 2│ 3│  ← TP dimension
+DP=1 │ 4│ 5│  │ 6│ 7│
+DP=2 │ 8│ 9│  │10│11│
+DP=3 │12│13│  │14│15│
+     └──┴──┘  └──┴──┘
+
+DP groups (4 groups of 4 ranks each):
+  [0,4,8,12], [1,5,9,13], [2,6,10,14], [3,7,11,15]
+
+PP groups (8 groups of 2 ranks each):
+  [0,2], [1,3], [4,6], [5,7], [8,10], [9,11], [12,14], [13,15]
+
+TP groups (8 groups of 2 ranks each):
+  [0,1], [2,3], [4,5], [6,7], [8,9], [10,11], [12,13], [14,15]
+
+===============================================================================
+
+Example 3: Using the API in Training Code
+------------------------------------------
+(Note: `init_mesh` is typically called via `init_process_groups` in `core/process_groups.py`)
+
+.. code-block:: python
+
+    from QuintNet.core.process_groups import init_process_groups
+
+    # Initialize the mesh for 8 GPUs (2 DP, 2 PP, 2 TP)
+    pg_manager = init_process_groups(mesh_dim=(2, 2, 2), mesh_name=('dp', 'pp', 'tp'))
+
+    my_global_rank = dist.get_rank()  # e.g., global rank 6
+    
+    # Get my coordinates within the mesh
+    coords = pg_manager.get_coordinates_tensor_search(my_global_rank)
+    # If my_global_rank is 6, coords will be [1, 1, 0] (dp=1, pp=1, tp=0)
+
+    # Get process groups for communication
+    dp_group = pg_manager.get_group('dp')  # For gradient averaging across data parallel
+    pp_group = pg_manager.get_group('pp')  # For pipeline stage communication
+    tp_group = pg_manager.get_group('tp')  # For tensor sharding within a layer
+
+    # Example usage of a process group:
+    # dist.all_reduce(grad_tensor, group=dp_group)
+    # dist.send(activation, dst=next_rank, group=pp_group)
+    # dist.all_gather(shard, group=tp_group)
+
+===============================================================================
+"""
+
 import torch
 import torch.distributed as dist
 from typing import Tuple, Union
@@ -5,111 +121,14 @@ import math
 import os
 from datetime import timedelta
 
-# ============================================================================
-# EXAMPLES OF HOW THE MESH WORKS
-# ============================================================================
-#
-# Example 1: Basic 3D Mesh with mesh_dim=(2, 2, 2)
-# ------------------------------------------------
-# When you call: init_mesh(mesh_dim=(2, 2, 2), mesh_name=('dp', 'pp', 'tp'))
-#
-# The mesh tensor looks like this (3D array of global ranks):
-#
-#        PP dimension (axis 1) →
-#        ┌─────┬─────┐
-#   DP   │ 0 1 │ 2 3 │  ← TP dimension (axis 2)
-#   dim  ├─────┼─────┤
-#   ↓    │ 4 5 │ 6 7 │
-#        └─────┴─────┘
-#
-# Written as a 3D tensor:
-# tensor([[[0, 1],   # dp=0, pp=0, tp=0-1
-#          [2, 3]],  # dp=0, pp=1, tp=0-1
-#
-#         [[4, 5],   # dp=1, pp=0, tp=0-1
-#          [6, 7]]]) # dp=1, pp=1, tp=0-1
-#
-# Process Groups Created:
-# -----------------------
-# DP groups (share same pp, tp): [[0,4], [1,5], [2,6], [3,7]]
-#   - Rank 0 and 4 share dp group (both at pp=0, tp=0)
-#   - Rank 2 and 6 share dp group (both at pp=1, tp=0)
-#
-# PP groups (share same dp, tp): [[0,2], [1,3], [4,6], [5,7]]
-#   - Rank 0 and 2 share pp group (both at dp=0, tp=0)
-#   - Rank 4 and 6 share pp group (both at dp=1, tp=0)
-#
-# TP groups (share same dp, pp): [[0,1], [2,3], [4,5], [6,7]]
-#   - Rank 0 and 1 share tp group (both at dp=0, pp=0)
-#   - Rank 6 and 7 share tp group (both at dp=1, pp=1)
-#
-# ============================================================================
-#
-# Example 2: What Rank 6 Sees
-# ----------------------------
-# When rank 6 calls _init_process_groups(), it discovers:
-#   - Its DP group: [2, 6] (coordinates: pp=1, tp=0)
-#   - Its PP group: [4, 6] (coordinates: dp=1, tp=0)
-#   - Its TP group: [6, 7] (coordinates: dp=1, pp=1)
-#
-# self.groups = {
-#     'dp': <ProcessGroup for ranks [2, 6]>,
-#     'pp': <ProcessGroup for ranks [4, 6]>,
-#     'tp': <ProcessGroup for ranks [6, 7]>
-# }
-#
-# ============================================================================
-#
-# Example 3: Larger Mesh with mesh_dim=(4, 2, 2)
-# -----------------------------------------------
-# 4 DP replicas, 2 PP stages, 2 TP shards = 16 total GPUs
-#
-# mesh tensor shape: (4, 2, 2)
-# Ranks 0-15 arranged as:
-#
-#         PP=0      PP=1
-#      ┌──┬──┐  ┌──┬──┐
-# DP=0 │ 0│ 1│  │ 2│ 3│  ← TP dimension
-# DP=1 │ 4│ 5│  │ 6│ 7│
-# DP=2 │ 8│ 9│  │10│11│
-# DP=3 │12│13│  │14│15│
-#      └──┴──┘  └──┴──┘
-#
-# DP groups (16 groups of 4 ranks each):
-#   [0,4,8,12], [1,5,9,13], [2,6,10,14], [3,7,11,15]
-#
-# PP groups (8 groups of 2 ranks each):
-#   [0,2], [1,3], [4,6], [5,7], [8,10], [9,11], [12,14], [13,15]
-#
-# TP groups (8 groups of 2 ranks each):
-#   [0,1], [2,3], [4,5], [6,7], [8,9], [10,11], [12,13], [14,15]
-#
-# ============================================================================
-#
-# Example 4: Using the API in Training Code
-# ------------------------------------------
-# mesh = init_mesh(mesh_dim=(2, 2, 2), mesh_name=('dp', 'pp', 'tp'))
-#
-# # Get my coordinates
-# my_rank = dist.get_rank()  # e.g., rank 6
-# coords = mesh.get_coordinates_tensor_search(my_rank)
-# # Returns: [1, 1, 0] meaning dp=1, pp=1, tp=0
-#
-# # Get process groups for communication
-# dp_group = mesh.get_group('dp')  # For gradient averaging across data parallel
-# pp_group = mesh.get_group('pp')  # For pipeline stage communication
-# tp_group = mesh.get_group('tp')  # For tensor sharding within a layer
-#
-# # Example: Reduce gradients across DP group
-# dist.all_reduce(grad_tensor, group=dp_group)
-#
-# # Example: Send activations to next pipeline stage
-# dist.send(activation, dst=next_rank, group=pp_group)
-#
-# ============================================================================
-
-
 class MeshGenerator:
+    """
+    Generates and manages the distributed device mesh and associated process groups.
+
+    This class is responsible for initializing the distributed backend,
+    creating communication groups for each parallelism dimension (DP, PP, TP),
+    and providing utilities to query rank coordinates within the mesh.
+    """
     def __init__(self,
                  mesh: Union[torch.Tensor, "ArrayLike"],
                  device_type: str = 'cuda',
@@ -118,30 +137,36 @@ class MeshGenerator:
                  is_backend_initialised: bool = False
                 ):
         """
-        Initialize the mesh and create process groups for each dimension.
-        
+        Initializes the MeshGenerator.
+
         Args:
-            mesh: The master map tensor showing which global rank is at each coordinate
-            device_type: Device type ('cuda' for GPUs)
-            mesh_dim: Dimensions of the mesh (e.g., (2, 2, 2) for 8 GPUs)
-            mesh_name: Names for each dimension (e.g., ('dp', 'pp', 'tp'))
-            is_backend_initialised: Whether dist.init_process_group was already called
+            mesh (Union[torch.Tensor, ArrayLike]): A tensor (or array-like)
+                representing the N-dimensional grid of global ranks. Each element
+                is a global rank, and its position defines its coordinates.
+                Must be a CPU tensor.
+            device_type (str): The type of device being used (e.g., 'cuda').
+            mesh_dim (Tuple[int, ...]): A tuple specifying the size of each
+                dimension in the mesh (e.g., (dp_size, pp_size, tp_size)).
+            mesh_name (Tuple[str, ...]): A tuple of strings, providing names
+                for each dimension (e.g., ('dp', 'pp', 'tp')).
+            is_backend_initialised (bool): If True, assumes `torch.distributed`
+                has already been initialized externally. If False, this class
+                will attempt to initialize it.
         
-        Example:
-            # For 8 GPUs with 2x2x2 mesh:
-            mesh = torch.arange(8).view(2, 2, 2)
-            # Creates tensor([[[0, 1], [2, 3]], [[4, 5], [6, 7]]])
-            generator = MeshGenerator(mesh, 'cuda', (2,2,2), ('dp','pp','tp'))
+        Raises:
+            ValueError: If `mesh` is not a CPU tensor.
+            RuntimeError: If the mesh size exceeds the world size.
         """
 
         if isinstance(mesh, torch.Tensor) and mesh.device.type != "cpu":
-            raise ValueError(f"`mesh` must be a CPU tensor, got {mesh}")
+            raise ValueError(f"`mesh` must be a CPU tensor, got {mesh.device.type}")
 
         self.mesh = (
             mesh.detach().to(dtype=torch.int)
             if isinstance(mesh, torch.Tensor)
             else torch.tensor(mesh, device="cpu", dtype=torch.int)
         )
+        # Store individual dimension sizes for convenience
         self.dp_size = mesh_dim[0]
         self.pp_size = mesh_dim[1]
         self.tp_size = mesh_dim[2]        
@@ -149,26 +174,29 @@ class MeshGenerator:
         self.mesh_dim = mesh_dim
         self.mesh_name = mesh_name
         
-        self.groups = {} # Will be populated by _init_process_groups
+        self.groups = {} # Dictionary to store created process groups (e.g., {'dp': pg_dp, 'pp': pg_pp})
 
+        # Initialize the distributed backend if not already done
         if not is_backend_initialised:
             self._setup_group_and_device()
 
-        # This needs to be called after setup
+        # Create the process groups for each dimension
         self._init_process_groups()
         
     def _setup_group_and_device(self):
         """
-        Initialize the distributed backend and set the device for this process.
-        
-        This is the global "handshake" where all processes connect.
-        Each process also claims its physical GPU (e.g., GPU 0, 1, 2, etc.)
+        Initializes the `torch.distributed` backend and sets the CUDA device
+        for the current process.
+
+        This method performs the global "handshake" for distributed communication
+        and assigns a physical GPU to each process based on its `LOCAL_RANK`
+        environment variable.
         """
 
         if not dist.is_initialized():
+            # Initialize the default process group with NCCCL backend
             dist.init_process_group(backend="nccl", timeout=timedelta(seconds=60))
 
-        # Now it's safe to call these
         world_size = dist.get_world_size()
         
         if self.mesh.numel() > world_size:
@@ -176,7 +204,7 @@ class MeshGenerator:
                 f"Mesh should not be bigger than default world size {world_size}, but found {self.mesh.numel()} ranks!"
             )
 
-        # CORRECTED: Simplified device setting logic
+        # Set the CUDA device for the current process based on LOCAL_RANK
         device_module = getattr(torch, self.device_type, None)
         if device_module:
             local_rank = int(os.environ["LOCAL_RANK"])
@@ -184,120 +212,83 @@ class MeshGenerator:
 
     def _init_process_groups(self):
         """
-        Create process groups for each dimension and populate self.groups.
-        
-        Example walkthrough for rank 6 with mesh_dim=(2,2,2):
-        
-        Iteration 1 (dim=0, 'dp'):
-          - Extracts DP groups: [[0,4], [1,5], [2,6], [3,7]]
-          - Rank 6 finds itself in [2,6]
-          - Creates group and stores: self.groups['dp'] = <ProcessGroup[2,6]>
-        
-        Iteration 2 (dim=1, 'pp'):
-          - Extracts PP groups: [[0,2], [1,3], [4,6], [5,7]]
-          - Rank 6 finds itself in [4,6]
-          - Stores: self.groups['pp'] = <ProcessGroup[4,6]>
-        
-        Iteration 3 (dim=2, 'tp'):
-          - Extracts TP groups: [[0,1], [2,3], [4,5], [6,7]]
-          - Rank 6 finds itself in [6,7]
-          - Stores: self.groups['tp'] = <ProcessGroup[6,7]>
+        Creates `torch.distributed.ProcessGroup` objects for each dimension
+        defined in `self.mesh_name` (e.g., 'dp', 'pp', 'tp').
+
+        Each process group consists of ranks that share the same coordinates
+        along all *other* dimensions. For example, a DP group contains ranks
+        that have the same PP and TP coordinates but different DP coordinates.
         """
         my_rank = dist.get_rank()
 
-        # CORRECTED: Use range(self.mesh.ndim) to iterate
+        # Iterate through each dimension (dp, pp, tp) to create its corresponding process groups
         for dim in range(self.mesh.ndim):
             dim_name = self.mesh_name[dim]
 
-            # Tensor magic: extract all groups for this dimension
-            # Example for dim=0 (DP) with mesh shape (2,2,2):
-            #   - swapdims(-1, 0) moves DP axis to the end
-            #   - reshape(-1, 2) creates groups: [[0,4], [1,5], [2,6], [3,7]]
+            # Use tensor manipulation to extract all possible subgroups for the current dimension.
+            # Example: For dim=0 (DP) with mesh shape (2,2,2):
+            #   - self.mesh.swapdims(-1, dim) moves the current dimension to the last axis.
+            #   - .reshape(-1, self.mesh.size(dim)) flattens the other dimensions and
+            #     groups ranks along the current dimension.
+            #   Result: A 2D tensor where each row is a list of global ranks forming a subgroup.
             process_groups_by_dim = self.mesh.swapdims(-1, dim).reshape(-1, self.mesh.size(dim))
             
-            # Search for which group this rank belongs to
-            for mesh_dim in process_groups_by_dim:
-                subgroup_ranks = mesh_dim.tolist()
+            # Search for which subgroup the current rank belongs to
+            for mesh_dim_group in process_groups_by_dim:
+                subgroup_ranks = mesh_dim_group.tolist()
 
-                # Added the crucial check to find which group this rank belongs to
                 if my_rank in subgroup_ranks:
-                    # Found our group! Create the process group.
-                    # Example: rank 6 and rank 2 both call this with ranks=[2,6]
+                    # If the current rank is part of this subgroup, create a new process group.
+                    # All ranks in `subgroup_ranks` will call `dist.new_group` with the
+                    # same list of ranks, ensuring they join the same group.
                     new_pg = dist.new_group(
                         ranks=subgroup_ranks,
                         backend="nccl"
                     )
                     self.groups[dim_name] = new_pg
                     
-                    # Break only after finding our group for this dimension
+                    # Once the group for this dimension is found and created, move to the next dimension.
                     break
     
     def get_group(self, dim_name: str) -> dist.ProcessGroup:
         """
-        Get the process group for a specific dimension.
-        
+        Retrieves the `torch.distributed.ProcessGroup` for a specified parallelism dimension.
+
         Args:
-            dim_name: Name of the dimension ('dp', 'pp', or 'tp')
-        
+            dim_name (str): The name of the dimension (e.g., 'dp', 'pp', or 'tp').
+
         Returns:
-            ProcessGroup object for communication within that dimension
+            dist.ProcessGroup: The process group object for communication within that dimension.
         
-        Example:
-            # In training code for rank 6:
-            mesh = init_mesh(mesh_dim=(2,2,2), mesh_name=('dp','pp','tp'))
-            
-            dp_group = mesh.get_group('dp')  # Returns ProcessGroup[2,6]
-            # Use for: dist.all_reduce(gradients, group=dp_group)
-            
-            pp_group = mesh.get_group('pp')  # Returns ProcessGroup[4,6]
-            # Use for: dist.send(activations, dst=4, group=pp_group)
-            
-            tp_group = mesh.get_group('tp')  # Returns ProcessGroup[6,7]
-            # Use for: dist.all_gather(shard, group=tp_group)
+        Raises:
+            KeyError: If `dim_name` is not a recognized dimension.
         """
         return self.groups[dim_name]
     
-    def get_group_by_global_rank(self, global_rank: str) -> str:
-        """Get the name of the process group that a global rank belongs to."""
-        ans: str = ""
-        for dim in range(self.mesh.ndim):
-            dim_name = self.mesh_name[dim]
-            if global_rank in self.process_groups[dim_name]:
-                ans = dim_name
-                
-        return ans
-            
-    def get_coordinates(self, rank):
-        """Get the coordinates of a rank in the mesh."""
-        dp_coord = rank//(self.pp_size*self.tp_size)
-        tp_coord = ((rank) // (self.pp_size))%(self.tp_size)
-        pp_coord = (rank) % (self.pp_size)
-        return [dp_coord, tp_coord, pp_coord]
-    
-    def get_coordinates_tensor_search(self, rank):
+    def get_coordinates_tensor_search(self, rank: int) -> list:
         """
-        Find coordinates by searching the mesh tensor.
-        This is the RECOMMENDED method - it's always correct.
-        
+        Finds the N-dimensional coordinates of a given global rank within the device mesh.
+
+        This method is robust and recommended as it directly queries the `self.mesh` tensor.
+
         Args:
-            rank: Global rank to find (0 to world_size-1)
-        
+            rank (int): The global rank to find (0 to world_size-1).
+
         Returns:
-            List of coordinates [dp_coord, pp_coord, tp_coord]
+            list: A list of integer coordinates, e.g., `[dp_coord, pp_coord, tp_coord]`.
         
-        Example for rank=6 with mesh_dim=(2,2,2):
-            mesh = tensor([[[0, 1], [2, 3]], [[4, 5], [6, 7]]])
+        Example for rank=6 with mesh_dim=(2,2,2) and mesh_name=('dp', 'pp', 'tp'):
+            `self.mesh` = tensor([[[0, 1], [2, 3]], [[4, 5], [6, 7]]])
             
-            Rank 6 is at position [1, 1, 0] in the tensor:
-            - dp dimension (axis 0): index 1
-            - pp dimension (axis 1): index 1  
-            - tp dimension (axis 2): index 0
-            
-            Returns: [1, 1, 0]
+            Searching for rank 6:
+            - `(self.mesh == rank).nonzero()` returns `tensor([[1, 1, 0]])`
+            - `[0].tolist()` extracts `[1, 1, 0]`
             
             This means rank 6 is:
             - In DP replica 1 (out of 2)
             - In PP stage 1 (out of 2)
             - In TP shard 0 (out of 2)
         """
+        # `(self.mesh == rank).nonzero()` returns the coordinates of the element
+        # in the tensor that matches `rank`. `[0]` takes the first (and only) match.
         return (self.mesh == rank).nonzero()[0].tolist()
