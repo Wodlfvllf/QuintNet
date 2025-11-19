@@ -1,0 +1,12 @@
+import torch.nn as nn
+from QuintNet.strategy.base_strategy import BaseStrategy
+
+class DataTensorParallelStrategy(BaseStrategy):
+    """
+    Data and Tensor Parallelism Strategy (DP+TP).
+    """
+    def apply(self, model: nn.Module) -> nn.Module:
+        from QuintNet.coordinators.dp_tp_coordinator import DPTCoordinator
+        
+        coordinator = DPTCoordinator(model, self.pg_manager, self.config, self.device)
+        return coordinator.parallelize()
