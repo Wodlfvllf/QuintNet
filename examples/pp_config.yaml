@@ -1,0 +1,24 @@
+# Pipeline Parallel (PP) Training Configuration
+dataset_path: /mnt/dataset/mnist/
+batch_size: 8
+num_workers: 2
+num_epochs: 10
+learning_rate: 1e-4
+grad_acc_steps: 4
+patience: 5
+
+# Model Configuration
+img_size: 28
+patch_size: 4
+hidden_dim: 64
+in_channels: 1
+n_heads: 4
+depth: 8
+
+# Parallelism Configuration
+device_type: cuda
+mesh_dim: [1, 4, 1]  # 4 GPUs for Pipeline Parallelism
+mesh_name: ['dp', 'pp', 'tp']
+strategy_name: 'pp'
+schedule: '1f1b'
+max_grad_norm: 1.0
