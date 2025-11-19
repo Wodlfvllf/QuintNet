@@ -23,10 +23,9 @@ from QuintNet.utils.Dataloader import CustomDataset, mnist_transform
 from QuintNet.utils.model import Model
 
 # Import parallelism components
-from QuintNet.parallelism.tensor_parallel import All_Gather, ColumnParallelLinear, apply_tensor_parallel
-from QuintNet.parallelism.data_parallel import CustomDDP
-from QuintNet.parallelism.pipeline_parallel import PipelineParallelWrapper, PipelineTrainer
-from QuintNet.core import init_mesh, MeshGenerator
+from QuintNet.core.process_groups import init_process_groups
+from QuintNet.parallelism.hybrid.strategy import get_strategy
+from QuintNet.parallelism.pipeline_parallel import PipelineTrainer
 
 
 
