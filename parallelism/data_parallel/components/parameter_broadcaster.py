@@ -1,4 +1,25 @@
-"""Parameter broadcasting component."""
+"""
+Parameter Broadcasting Component
+
+This module defines the `ParameterBroadcaster` class, which is responsible
+for ensuring that all model replicas in a Distributed Data Parallel (DDP)
+setup start with identical parameters.
+
+===============================================================================
+CONCEPTUAL OVERVIEW:
+===============================================================================
+
+In DDP, each process typically initializes its own model replica. To ensure
+consistent training, it's crucial that all these replicas begin with the
+exact same set of weights. The `ParameterBroadcaster` achieves this by
+broadcasting the initial parameters from a designated source rank (usually
+rank 0) to all other ranks.
+
+This component uses the configured `DistributedBackend` to perform the
+broadcast operation for each parameter in the model.
+
+===============================================================================
+"""
 
 import torch.nn as nn
 
@@ -6,20 +27,43 @@ from QuintNet.parallelism.data_parallel.backends.base import DistributedBackend
 from QuintNet.parallelism.data_parallel.core.config import DistributedConfig
 
 class ParameterBroadcaster:
-    """Handles parameter broadcasting."""
+    """
+    Handles the broadcasting of model parameters from a source rank (typically rank 0)
+    to all other ranks in a distributed data parallel group.
+
+    This ensures that all model replicas start with identical weights.
+    """
     
     def __init__(self, backend: DistributedBackend, distributed_config: DistributedConfig):
+        """
+        Initializes the ParameterBroadcaster.
+
+        Args:
+            backend (DistributedBackend): The distributed communication backend to use.
+            distributed_config (DistributedConfig): Configuration for the
+                distributed environment, including the process group and rank.
+        """
         self.backend = backend
         self.config = distributed_config
     
     def broadcast_parameters(self, model: nn.Module) -> None:
-        """Broadcast model parameters from rank 0 to all ranks."""
+        """
+        Broadcasts the `data` of each parameter in the model from rank 0
+        to all other ranks in the configured process group.
+
+        Args:
+            model (nn.Module): The model whose parameters need to be broadcasted.
+        """
         if not self.backend.is_initialized():
+            # If distributed backend is not initialized, no broadcasting is needed.
             return
         
+        # Print a message to indicate the start of broadcasting, only on the current rank.
         print(f"CustomDDP Rank {self.config.rank}: Broadcasting parameters from rank 0")
         
+        # Iterate through all parameters of the model and broadcast their data.
         for param in model.parameters():
             self.backend.broadcast_tensor(tensor=param.data, src=0, group=self.config.process_group)
 
+        # Print a message to indicate completion, only on the current rank.
         print(f"CustomDDP Rank {self.config.rank}: Parameter broadcast complete")
