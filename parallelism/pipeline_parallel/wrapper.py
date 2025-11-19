@@ -1,16 +1,41 @@
 """
-Pipeline Parallel Wrapper for Vision Transformer.
-Splits model across pipeline stages.
+Pipeline Parallel Wrapper
+
+This module contains the `PipelineParallelWrapper`, which is responsible for
+splitting a standard `nn.Module` into multiple stages for pipeline parallelism.
+
+===============================================================================
+CONCEPTUAL OVERVIEW:
+===============================================================================
+
+Pipeline parallelism involves splitting the layers of a model across multiple
+devices (GPUs). Each device holds a "stage" of the model. During a training
+step, data flows through these stages sequentially.
+
+Consider a 4-layer model on 2 GPUs:
+- GPU 0 (Stage 0) holds Layer 1 and Layer 2.
+- GPU 1 (Stage 1) holds Layer 3 and Layer 4.
+
+The `PipelineParallelWrapper` automates this process. When initialized on a
+specific rank, it determines which layers belong to that rank's stage and
+constructs a local `nn.Sequential` module containing only those layers.
+
+It also handles the custom `backward` pass required for pipeline parallelism,
+which is not a standard `nn.Module` method but is called by the `PipelineTrainer`.
+
+===============================================================================
 """
 
 import torch
 import torch.nn as nn
-
+import torch.distributed as dist
 
 class PipelineParallelWrapper(nn.Module):
     """
-    Wraps a Vision Transformer model for pipeline parallelism.
-    Distributes transformer blocks across multiple GPUs.
+    Wraps a model (specifically, the custom ViT `Model`) for pipeline parallelism.
+
+    This class automatically distributes the transformer blocks of the model
+    across multiple devices, creating a pipeline stage on each device.
     """
     def __init__(self, 
                  model, 
@@ -21,9 +46,19 @@ class PipelineParallelWrapper(nn.Module):
                  device
                  ):
         """
+        Initializes the PipelineParallelWrapper.
+
         Args:
-            model: The complete ViT model to be split
-            pgm: ProcessGroupManager instance
+            model (nn.Module): The complete model to be split into stages.
+                This wrapper is specifically designed for the `Model` class
+                in `QuintNet.utils.model`.
+            device_mesh: The device mesh object, used to get rank information.
+            rank (int): The rank of the current process within the pipeline
+                parallel group.
+            pp_group (dist.ProcessGroup): The process group for pipeline
+                parallel communication.
+            pp_size (int): The total number of stages in the pipeline.
+            device (torch.device): The CUDA device for the current process.
         """
         super().__init__()
         
@@ -32,61 +67,71 @@ class PipelineParallelWrapper(nn.Module):
         self.world_size = pp_size
         self.group = pp_group
         self.is_first_stage = (self.rank == 0)
-        self.is_last_stage = (self.rank == self.world_size-1)
-        self.tensor_shapes = None
-        # Get model depth (number of transformer blocks)
+        self.is_last_stage = (self.rank == self.world_size - 1)
+        self.tensor_shapes = None # Shape of the input tensor for this stage
+        
+        # The wrapper assumes the model has a `blocks` attribute which is a list of layers.
         self.depth = len(model.blocks)
         
-        # Determine which layers belong to this stage
-        self.layer_distribution = self.distribute_layers(self.depth)
+        # Determine which layers (transformer blocks) belong to this stage.
+        self.layer_distribution = self._distribute_layers(self.depth)
         
-        # Build local module for this stage
+        # Build the local module for this stage from the full model.
         self.local_module = self._build_local_module(model)
         
-        # Move to correct device
+        # Move the local module to the correct device.
         self.device = device
         self.local_module = self.local_module.to(self.device)
 
-        print(f"[PipelineWrapper Rank {self.rank}] Initialized with blocks {self.layer_distribution}")
+        # Print a message on the first DP rank of each stage for clarity.
+        if self.device_mesh.get_coordinates_tensor_search(dist.get_rank())[0] == 0:
+            print(f"[Rank {dist.get_rank()}] PP Stage {self.rank}: Holding blocks {self.layer_distribution}")
     
-    def distribute_layers(self, num_layers):
+    def _distribute_layers(self, num_layers: int) -> list:
         """
-        Distribute transformer blocks across GPUs as evenly as possible.
-        
+        Calculates which layer indices belong to the current pipeline stage.
+
+        This method distributes layers as evenly as possible across all stages.
+
         Args:
-            num_layers: Total number of transformer blocks
-        
+            num_layers (int): The total number of layers to distribute.
+
         Returns:
-            List of block indices for this pipeline stage
+            list: A list of layer indices assigned to the current rank.
         """
-        # Calculate blocks per GPU
+        # Calculate the number of layers for each GPU/stage.
+        # The modulo operator ensures that any remainder layers are distributed
+        # one by one to the first few stages.
         layers_per_gpu = [
             num_layers // self.world_size + (1 if i < num_layers % self.world_size else 0)
             for i in range(self.world_size)
         ]
         
-        # Calculate starting block for this GPU
+        # Calculate the start and end indices for the current rank's layers.
         start_layer = sum(layers_per_gpu[:self.rank])
         end_layer = start_layer + layers_per_gpu[self.rank]
         
         return list(range(start_layer, end_layer))
     
-    def _build_local_module(self, model):
+    def _build_local_module(self, model: nn.Module) -> nn.Sequential:
         """
-        Build the local module for this pipeline stage.
-        
+        Constructs the `nn.Sequential` module for the current pipeline stage.
+
+        This method assembles the correct layers (embedding, transformer blocks,
+        classification head) based on whether it is the first, middle, or last
+        stage in the pipeline.
+
         Args:
-            model: The complete model
-        
+            model (nn.Module): The complete, original model.
+
         Returns:
-            nn.Sequential containing the layers for this stage
+            nn.Sequential: The module representing the local pipeline stage.
         """
         modules = []
         
-        # First stage: add embedding
-        # Determine the correct tensor shape for this stage's INPUT
+        # The first stage is unique: it includes the model's embedding layer.
         if self.is_first_stage:
-            # The first stage's input is the image itself.
+            # Its input is the raw image data. We save this shape for communication.
             self.tensor_shapes = (
                 model.embedding.in_channels,
                 model.embedding.img_size,
@@ -94,72 +139,84 @@ class PipelineParallelWrapper(nn.Module):
             )
             modules.append(model.embedding)
         else:
-            # Subsequent stages receive the output of the previous stage's transformer blocks.
-            # The shape is (batch_size, num_patches + 1, hidden_dim).
+            # Subsequent stages receive activations from the previous stage.
+            # We calculate the shape of these activations for communication.
             num_patches = (model.embedding.img_size // model.embedding.patch_size)**2
             self.tensor_shapes = (
-                num_patches + 1,
-                model.blocks[0].hidden_dim # Assuming hidden_dim is consistent
+                num_patches + 1, # +1 for the [CLS] token
+                model.blocks[0].hidden_dim # Assumes hidden_dim is consistent
             )
 
-        # All stages: add assigned transformer blocks
+        # All stages include their assigned transformer blocks.
         for block_idx in self.layer_distribution:
             modules.append(model.blocks[block_idx])
         
-        # Last stage: add classification head
+        # The last stage is unique: it includes the final classification head.
         if self.is_last_stage:
             modules.append(model.classification_head)
         
         return nn.Sequential(*modules)
 
-    def get_tensor_shapes(self, batch_size):
-        "Expand tensor shapes to batch size"
-        return (batch_size, *self.tensor_shapes)
-            
-
-
-    def forward(self, x):
+    def get_tensor_shapes(self, batch_size: int) -> tuple:
         """
-        Forward pass through this pipeline stage.
-        
+        Gets the expected shape of the input tensor for this stage, including batch size.
+
         Args:
-            x: Input tensor (images for first stage, hidden states for others)
-        
+            batch_size (int): The current batch size.
+
         Returns:
-            Output tensor for next stage or final predictions
+            tuple: The full shape of the input tensor for this stage.
+        """
+        return (batch_size, *self.tensor_shapes)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Performs the forward pass for only the layers in this pipeline stage.
+
+        Args:
+            x (torch.Tensor): The input tensor. For the first stage, this is the
+                batch of images. For subsequent stages, it is the activation
+                tensor from the previous stage.
+
+        Returns:
+            torch.Tensor: The output activation tensor to be passed to the next stage.
         """
         return self.local_module(x)
     
-    def backward(self, input_tensor, output_tensor, output_tensor_grad):
+    def backward(self, input_tensor: torch.Tensor, output_tensor: torch.Tensor, output_tensor_grad: torch.Tensor) -> torch.Tensor:
         """
-        Backward pass for this pipeline stage.
-        
+        Performs the backward pass for this pipeline stage.
+
+        This is a custom method called by the `PipelineTrainer`, not by `torch.autograd`.
+
         Args:
-            input_tensor: Input to forward pass (to compute input gradients)
-            output_tensor: Output from forward pass
-            output_tensor_grad: Gradient from next stage
-        
+            input_tensor (torch.Tensor): The input tensor that was saved from the forward pass.
+            output_tensor (torch.Tensor): The output tensor that was saved from the forward pass.
+            output_tensor_grad (torch.Tensor): The gradient of the loss with respect
+                to the output of this stage, received from the next stage.
+
         Returns:
-            Gradient with respect to input tensor
+            torch.Tensor: The gradient of the loss with respect to the input of this
+                stage, which will be sent to the previous stage.
         """
-        # Retain gradient for input tensor if it exists
+        # We need to retain the grad on the input tensor if it's not a leaf,
+        # so we can compute the gradient w.r.t. it.
         if input_tensor is not None:
             input_tensor.retain_grad()
         
-        # If no gradient provided (last stage), create ones tensor
+        # For the last stage, the `output_tensor_grad` is None, as it's the start
+        # of the backward pass. We initialize it with ones.
         if output_tensor_grad is None:
             output_tensor_grad = torch.ones_like(
                 output_tensor, 
                 memory_format=torch.preserve_format
             )
         
-        # Perform backward pass
+        # Execute the backward pass for the local module.
         torch.autograd.backward(
-            output_tensor,
-            grad_tensors=output_tensor_grad,
-            retain_graph=False,
-            create_graph=False
+            tensors=(output_tensor,),
+            grad_tensors=(output_tensor_grad,),
         )
         
-        # Return input gradient to send to previous stage
+        # Return the gradient of the input tensor, which will be passed to the previous stage.
         return input_tensor.grad if input_tensor is not None else None
