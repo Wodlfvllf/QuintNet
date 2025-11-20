@@ -30,7 +30,7 @@ image = (
     .run_commands("pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121")
     # Add the QuintNet directory to the image
     .add_local_dir(
-        str(Path(__file__).parent.parent), # Get the root QuintNet dir
+        local_path=Path(__file__).parent, # Mount the QuintNet directory
         remote_path="/workspace/QuintNet"
     )
 )
