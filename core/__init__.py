@@ -8,10 +8,10 @@ This module contains fundamental abstractions for:
 - Communication primitives
 """
 
-from QuintNet.core.mesh import MeshGenerator, init_mesh
-from QuintNet.core.distributed import setup_distributed, cleanup_distributed
-from QuintNet.core.process_groups import ProcessGroupManager
-from QuintNet.core.communication import (
+from .mesh import MeshGenerator, init_mesh
+from .distributed import setup_distributed, cleanup_distributed
+from .process_groups import ProcessGroupManager
+from .communication import (
     all_reduce,
     all_gather,
     reduce_scatter,

@@ -37,7 +37,7 @@ import torch
 import torch.distributed as dist
 from typing import Tuple, Dict
 import math
-from QuintNet.core.mesh import MeshGenerator
+from .mesh import MeshGenerator
 
 class ProcessGroupManager:
     """
