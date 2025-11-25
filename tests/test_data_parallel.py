@@ -39,8 +39,8 @@ import pytest
 import torch
 import torch.nn as nn
 import torch.distributed as dist
-from QuintNet.parallelism.data_parallel import CustomDDP
-from QuintNet.core.process_groups import ProcessGroupManager # Used for consistency, though not strictly by CustomDDP itself
+from ..parallelism.data_parallel import CustomDDP
+from ..core.process_groups import ProcessGroupManager # Used for consistency, though not strictly by CustomDDP itself
 
 @pytest.mark.world_size(2)
 def test_ddp_gradient_synchronization(distributed_env, device):
