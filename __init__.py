@@ -14,7 +14,8 @@ __version__ = "2.0.0"
 __author__ = "QuintNet Team"
 
 # Core imports
-from .core.mesh import MeshGenerator, init_mesh
+from .core.mesh import MeshGenerator
+from .core.process_groups import init_process_groups
 from .core.distributed import setup_distributed, cleanup_distributed
 
 # Parallelism strategies
@@ -28,7 +29,7 @@ from .parallelism import (
 __all__ = [
     # Core
     'MeshGenerator',
-    'init_mesh',
+    'init_process_groups',
     'setup_distributed',
     'cleanup_distributed',
     
