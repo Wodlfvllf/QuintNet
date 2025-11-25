@@ -30,7 +30,7 @@ import torch
 import torch.nn as nn
 import torch.distributed as dist
 
-from QuintNet.parallelism.tensor_parallel.layers import ColumnParallelLinear, RowParallelLinear
+from .layers import ColumnParallelLinear, RowParallelLinear
 from typing import Optional
 
 
