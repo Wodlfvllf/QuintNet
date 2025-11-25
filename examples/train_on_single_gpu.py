@@ -6,9 +6,9 @@ from tqdm import tqdm
 import time
 
 # Import from utilities package
-from ..utilities.utils import *
-from ..utilities.Dataloader import CustomDataset, mnist_transform
-from ..utilities.model import Attention, Model, PatchEmbedding, MLP
+from ..utils import CustomDataset, mnist_transform, Model
+from ..utils.model import MLP
+from ..core import load_config
 
 
 def train_epoch(model, train_loader, criterion, optimizer, device):
