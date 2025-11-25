@@ -53,7 +53,7 @@ def run_3d_parallel_training():
 
     # Setup Python path and working directory
     sys.path.insert(0, "/workspace")
-    os.chdir("/workspace/QuintNet")
+    os.chdir("/workspace")
 
     # Print startup info
     print("="*80)
@@ -86,10 +86,12 @@ def run_3d_parallel_training():
     os.environ["WORLD_SIZE"] = "8"
 
     # Command to run distributed training for QuintNet
+    # We run as a module (-m) so that relative imports work correctly
     cmd = [
         "torchrun",
         "--nproc_per_node=8",
-        "examples/full_3d.py"
+        "-m", "QuintNet.examples.full_3d",
+        "--config", "QuintNet/examples/config.yaml"
     ]
 
     print(f"🔥 Launching: {' '.join(cmd)}")
