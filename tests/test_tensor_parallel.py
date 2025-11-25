@@ -34,8 +34,8 @@ import pytest
 import torch
 import torch.nn as nn
 import torch.distributed as dist
-from QuintNet.core.process_groups import ProcessGroupManager
-from QuintNet.parallelism.tensor_parallel.layers import ColumnParallelLinear, RowParallelLinear
+from ..core.process_groups import ProcessGroupManager
+from ..parallelism.tensor_parallel.layers import ColumnParallelLinear, RowParallelLinear
 
 @pytest.mark.world_size(2)
 def test_column_parallel_linear(distributed_env, device):
