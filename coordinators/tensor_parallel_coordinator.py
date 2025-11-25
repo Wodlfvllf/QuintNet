@@ -5,9 +5,9 @@ Coordinator for Tensor Parallelism.
 import torch
 import torch.nn as nn
 import torch.distributed as dist
-from QuintNet.coordinators.main_coordinator import BaseCoordinator
-from QuintNet.core.process_groups import ProcessGroupManager
-from QuintNet.parallelism.tensor_parallel.rewrite import apply_tensor_parallel
+from .main_coordinator import BaseCoordinator
+from ..core.process_groups import ProcessGroupManager
+from ..parallelism.tensor_parallel.rewrite import apply_tensor_parallel
 
 class TensorParallelCoordinator(BaseCoordinator):
     """
