@@ -6,11 +6,11 @@ import torch
 import torch.nn as nn
 import torch.distributed as dist
 import os
-from QuintNet.coordinators.main_coordinator import BaseCoordinator
-from QuintNet.core.process_groups import ProcessGroupManager
-from QuintNet.parallelism.tensor_parallel import apply_tensor_parallel
-from QuintNet.parallelism.pipeline_parallel import PipelineParallelWrapper
-from QuintNet.parallelism.data_parallel import CustomDDP
+from .main_coordinator import BaseCoordinator
+from ..core.process_groups import ProcessGroupManager
+from ..parallelism.tensor_parallel import apply_tensor_parallel
+from ..parallelism.pipeline_parallel import PipelineParallelWrapper
+from ..parallelism.data_parallel import CustomDDP
 
 class Hybrid3DCoordinator(BaseCoordinator):
     """
