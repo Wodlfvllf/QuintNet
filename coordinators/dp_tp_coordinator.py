@@ -4,10 +4,10 @@ Coordinator for 2D Hybrid Parallelism (DP + TP).
 
 import torch.nn as nn
 import torch.distributed as dist
-from QuintNet.coordinators.main_coordinator import BaseCoordinator
-from QuintNet.core.process_groups import ProcessGroupManager
-from QuintNet.parallelism.tensor_parallel.rewrite import apply_tensor_parallel
-from QuintNet.parallelism.data_parallel.core.ddp import CustomDDP
+from .main_coordinator import BaseCoordinator
+from ..core.process_groups import ProcessGroupManager
+from ..parallelism.tensor_parallel.rewrite import apply_tensor_parallel
+from ..parallelism.data_parallel.core.ddp import CustomDDP
 
 class DPTCoordinator(BaseCoordinator):
     """
