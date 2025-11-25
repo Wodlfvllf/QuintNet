@@ -8,9 +8,10 @@ This module contains fundamental abstractions for:
 - Communication primitives
 """
 
-from .mesh import MeshGenerator, init_mesh
+from .mesh import MeshGenerator
 from .distributed import setup_distributed, cleanup_distributed
-from .process_groups import ProcessGroupManager
+from .process_groups import ProcessGroupManager, init_process_groups
+from .config import load_config
 from .communication import (
     all_reduce,
     all_gather,
@@ -22,10 +23,11 @@ from .communication import (
 
 __all__ = [
     'MeshGenerator',
-    'init_mesh',
+    'init_process_groups',
     'setup_distributed',
     'cleanup_distributed',
     'ProcessGroupManager',
+    'load_config',
     'all_reduce',
     'all_gather',
     'reduce_scatter',
