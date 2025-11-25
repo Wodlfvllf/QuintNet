@@ -28,9 +28,9 @@ import pytest
 import torch
 import torch.nn as nn
 import torch.distributed as dist
-from QuintNet.core.process_groups import ProcessGroupManager
-from QuintNet.parallelism.pipeline_parallel.wrapper import PipelineParallelWrapper
-from QuintNet.utils.model import Model, TransformerBlock, ViTEmbedding, ClassificationHead
+from ..core.process_groups import ProcessGroupManager
+from ..parallelism.pipeline_parallel.wrapper import PipelineParallelWrapper
+from ..utils.model import Model, TransformerBlock, ViTEmbedding, ClassificationHead
 
 @pytest.mark.world_size(2)
 def test_layer_distribution(distributed_env, device):
