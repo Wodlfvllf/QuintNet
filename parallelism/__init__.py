@@ -8,10 +8,10 @@ This module contains implementations of:
 - Hybrid 3D Parallelism (DP + TP + PP)
 """
 
-from QuintNet.parallelism.data_parallel import DataParallel, CustomDDP
-from QuintNet.parallelism.tensor_parallel import TensorParallel, ColumnParallelLinear, RowParallelLinear
-from QuintNet.parallelism.pipeline_parallel import PipelineParallel, PipelineParallelWrapper, PipelineTrainer
-from QuintNet.parallelism.hybrid import HybridParallel, HybridParallelCoordinator
+from .data_parallel import CustomDDP as DataParallel, CustomDDP
+from .tensor_parallel import apply_tensor_parallel as TensorParallel, ColumnParallelLinear, RowParallelLinear
+from .pipeline_parallel import PipelineParallelWrapper as PipelineParallel, PipelineParallelWrapper, PipelineTrainer
+# from .hybrid import HybridParallel, HybridParallelCoordinator # Hybrid module missing
 
 __all__ = [
     # Data Parallel
@@ -30,6 +30,6 @@ __all__ = [
     'PipelineTrainer',
     
     # Hybrid
-    'HybridParallel',
-    'HybridParallelCoordinator',
+    # 'HybridParallel',
+    # 'HybridParallelCoordinator',
 ]

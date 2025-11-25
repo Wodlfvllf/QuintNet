@@ -33,9 +33,9 @@ synchronized weights during the training process.
 
 import torch.distributed as dist
 
-from QuintNet.parallelism.data_parallel.backends.base import DistributedBackend
-from QuintNet.parallelism.data_parallel.core.config import DistributedConfig, ReductionStrategy
-from QuintNet.parallelism.data_parallel.components.bucket import GradientBucket
+from .backends.base import DistributedBackend
+from ..core.config import DistributedConfig, ReductionStrategy
+from .bucket import GradientBucket
 
 class GradientReducer:
     """

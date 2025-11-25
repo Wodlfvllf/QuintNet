@@ -23,8 +23,8 @@ broadcast operation for each parameter in the model.
 
 import torch.nn as nn
 
-from QuintNet.parallelism.data_parallel.backends.base import DistributedBackend
-from QuintNet.parallelism.data_parallel.core.config import DistributedConfig
+from ..backends.base import DistributedBackend
+from ..core.config import DistributedConfig
 
 class ParameterBroadcaster:
     """

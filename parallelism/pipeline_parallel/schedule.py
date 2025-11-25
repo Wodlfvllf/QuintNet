@@ -33,7 +33,7 @@ patterns.
 import torch
 import torch.distributed as dist
 from abc import ABC, abstractmethod
-from QuintNet.core.communication import pipeline_communicate, bidirectional_pipeline_communicate
+from ...core.communication import pipeline_communicate, bidirectional_pipeline_communicate
 
 class PipelineSchedule(ABC):
     """

@@ -35,7 +35,7 @@ backward passes.
 import torch
 import torch.nn as nn
 import torch.distributed as dist
-from QuintNet.core.communication import All_Gather, All_Reduce
+from ...core.communication import All_Gather, All_Reduce
 from typing import Optional, List, Tuple
 
 

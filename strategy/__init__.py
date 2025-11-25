@@ -39,15 +39,15 @@ is being used.
 """
 
 from typing import Dict, Any
-from QuintNet.core.process_groups import ProcessGroupManager
-from QuintNet.strategy.base_strategy import BaseStrategy
-from QuintNet.strategy.data_parallel_strategy import DataParallelStrategy
-from QuintNet.strategy.tensor_parallel_strategy import TensorParallelStrategy
-from QuintNet.strategy.pipeline_parallel_strategy import PipelineParallelStrategy
-from QuintNet.strategy.dp_tp_strategy import DataTensorParallelStrategy
-from QuintNet.strategy.dp_pp_strategy import DataPipelineParallelStrategy
-from QuintNet.strategy.tp_pp_strategy import TensorPipelineParallelStrategy
-from QuintNet.strategy.hybrid_3d_strategy import Hybrid3DStrategy
+from ..core.process_groups import ProcessGroupManager
+from .base_strategy import BaseStrategy
+from .data_parallel_strategy import DataParallelStrategy
+from .tensor_parallel_strategy import TensorParallelStrategy
+from .pipeline_parallel_strategy import PipelineParallelStrategy
+from .dp_tp_strategy import DataTensorParallelStrategy
+from .dp_pp_strategy import DataPipelineParallelStrategy
+from .tp_pp_strategy import TensorPipelineParallelStrategy
+from .hybrid_3d_strategy import Hybrid3DStrategy
 
 def get_strategy(strategy_name: str, pg_manager: ProcessGroupManager, config: Dict[str, Any]) -> BaseStrategy:
     """

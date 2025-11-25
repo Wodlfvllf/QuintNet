@@ -38,12 +38,12 @@ communication strategies and optimizations.
 import torch.nn as nn
 from typing import Optional, List, Tuple
 
-from QuintNet.parallelism.data_parallel.backends.base import DistributedBackend
-from QuintNet.parallelism.data_parallel.backends.torch_backend import TorchDistributedBackend
-from QuintNet.parallelism.data_parallel.components.bucket_manager import BucketManager
-from QuintNet.parallelism.data_parallel.components.gradient_reducer import GradientReducer
-from QuintNet.parallelism.data_parallel.components.parameter_broadcaster import ParameterBroadcaster
-from QuintNet.parallelism.data_parallel.core.config import DistributedConfig, BucketConfig, ReductionStrategy
+from ..backends.base import DistributedBackend
+from ..backends.torch_backend import TorchDistributedBackend
+from ..components.bucket_manager import BucketManager
+from ..components.gradient_reducer import GradientReducer
+from ..components.parameter_broadcaster import ParameterBroadcaster
+from .config import DistributedConfig, BucketConfig, ReductionStrategy
 
 class CustomDDP(nn.Module):
     """

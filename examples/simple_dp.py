@@ -6,15 +6,15 @@ import torch
 import torch.distributed as dist
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
-import argparse
+import argparse 
 import time
 
-from QuintNet.utils.Dataloader import CustomDataset, mnist_transform
-from QuintNet.utils.model import Model
-from QuintNet.core.config import load_config
-from QuintNet.core.process_groups import init_process_groups
-from QuintNet.strategy import get_strategy
-from QuintNet.trainer import Trainer
+from ..utils.Dataloader import CustomDataset, mnist_transform
+from ..utils.model import Model
+from ..core.config import load_config
+from ..core.process_groups import init_process_groups
+from ..strategy import get_strategy
+from ..trainer import Trainer
 
 def main():
     """

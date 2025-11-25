@@ -8,9 +8,9 @@ This package provides utilities for tensor parallelism including:
 - Process group management
 """
 
-from QuintNet.core.communication import All_Gather, All_Reduce, ReduceScatter
+from ...core.communication import All_Gather, All_Reduce, ReduceScatter
 from .layers import ColumnParallelLinear, RowParallelLinear, VocabParallelEmbedding
-from .rewrite import apply_tensor_parallel
+from .model_wrapper import apply_tensor_parallel
 
 
 __all__ = [

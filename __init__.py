@@ -14,15 +14,15 @@ __version__ = "2.0.0"
 __author__ = "QuintNet Team"
 
 # Core imports
-from QuintNet.core.mesh import MeshGenerator, init_mesh
-from QuintNet.core.distributed import setup_distributed, cleanup_distributed
+from .core.mesh import MeshGenerator, init_mesh
+from .core.distributed import setup_distributed, cleanup_distributed
 
 # Parallelism strategies
-from QuintNet.parallelism import (
+from .parallelism import (
     DataParallel,
     TensorParallel,
     PipelineParallel,
-    HybridParallel
+    # HybridParallel
 )
 
 __all__ = [
@@ -36,5 +36,5 @@ __all__ = [
     'DataParallel',
     'TensorParallel',
     'PipelineParallel',
-    'HybridParallel',
+    # 'HybridParallel',
 ]

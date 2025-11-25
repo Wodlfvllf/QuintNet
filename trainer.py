@@ -51,8 +51,8 @@ import torch.distributed as dist
 from tqdm import tqdm
 import os
 
-from QuintNet.parallelism.pipeline_parallel import PipelineTrainer, PipelineDataLoader
-from QuintNet.core.process_groups import ProcessGroupManager
+from .parallelism.pipeline_parallel import PipelineTrainer, PipelineDataLoader
+from .core.process_groups import ProcessGroupManager
 
 class Trainer:
     """
