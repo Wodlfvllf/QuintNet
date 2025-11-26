@@ -4,12 +4,12 @@ import torch
 import torch.distributed as dist
 from typing import Optional
 
-from ..core.ddp import CustomDDP
+from ..core import DataParallel
 from ..core.config import DistributedConfig, BucketConfig
 from ..backends.local_backend import LocalBackend
 from ..backends.torch_backend import TorchDistributedBackend
 
-def create_local_ddp(model: torch.nn.Module, bucket_config: Optional[BucketConfig] = None) -> CustomDDP:
+def create_local_ddp(model: torch.nn.Module, bucket_config: Optional[BucketConfig] = None) -> DataParallel:
     """Create a CustomDDP instance for local (non-distributed) training."""
     return CustomDDP(
         model=model,
