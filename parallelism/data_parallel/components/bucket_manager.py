@@ -36,7 +36,7 @@ import torch.nn as nn
 from typing import Dict, List, Tuple, Callable
 
 from .bucket import GradientBucket
-from ..core import BucketConfig
+from ..core.config import BucketConfig
 
 class BucketManager:
     """
