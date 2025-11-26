@@ -10,7 +10,7 @@ from .main_coordinator import BaseCoordinator
 from ..core.process_groups import ProcessGroupManager
 from ..parallelism.tensor_parallel import apply_tensor_parallel
 from ..parallelism.pipeline_parallel import PipelineParallelWrapper
-from ..parallelism.data_parallel import CustomDDP
+from ..parallelism.data_parallel import DataParallel
 
 class Hybrid3DCoordinator(BaseCoordinator):
     """
@@ -42,7 +42,7 @@ class Hybrid3DCoordinator(BaseCoordinator):
         2.  **Pipeline Parallelism (PP):** The tensor-sharded model is then
             split into stages across the pipeline-parallel group.
         3.  **Data Parallelism (DP):** The entire tensor-and-pipeline-parallel
-            model is then replicated, and `CustomDDP` is used to synchronize
+            model is then replicated, and `DataParallel` is used to synchronize
             gradients across these replicas.
 
         Returns:
@@ -85,6 +85,6 @@ class Hybrid3DCoordinator(BaseCoordinator):
         ).to(device)
 
         # --- 3. Apply Data Parallelism ---
-        dp_model = CustomDDP(pp_model)
+        dp_model = DataParallel(pp_model)
 
         return dp_model
