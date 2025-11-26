@@ -7,7 +7,7 @@ import torch.distributed as dist
 from .main_coordinator import BaseCoordinator
 from ..core.process_groups import ProcessGroupManager
 from ..parallelism.tensor_parallel.rewrite import apply_tensor_parallel
-from ..parallelism.data_parallel.core.ddp import CustomDDP
+from ..parallelism.data_parallel.core.ddp import DataParallel
 
 class DPTCoordinator(BaseCoordinator):
     """
@@ -40,7 +40,7 @@ class DPTCoordinator(BaseCoordinator):
         1.  **Tensor Parallelism (TP):** The model's layers are first sharded
             across the GPUs in the tensor-parallel group.
         2.  **Data Parallelism (DP):** The now tensor-sharded model is then
-            replicated across the data-parallel group using `CustomDDP`.
+            replicated across the data-parallel group using `DataParallel`.
 
         Returns:
             nn.Module: The fully parallelized model.
@@ -63,7 +63,7 @@ class DPTCoordinator(BaseCoordinator):
         )
 
         # --- 2. Apply Data Parallelism ---
-        # The CustomDDP wrapper will handle gradient synchronization across the DP group.
-        dp_model = CustomDDP(tp_model)
+        # The DataParallel wrapper will handle gradient synchronization across the DP group.
+        dp_model = DataParallel(tp_model)
         
         return dp_model
