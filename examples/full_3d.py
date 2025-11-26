@@ -38,6 +38,9 @@ def main():
         mesh_dim=config['mesh_dim'],
         mesh_name=config['mesh_name']
     )
+    
+    # Visualize the mesh configuration
+    pg_manager.print_mesh_info()
 
     # Set seed for reproducibility
     torch.manual_seed(42)

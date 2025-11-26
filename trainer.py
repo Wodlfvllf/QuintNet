@@ -51,7 +51,7 @@ import torch.distributed as dist
 from tqdm import tqdm
 import os
 
-from .parallelism.pipeline_parallel import PipelineTrainer, PipelineDataLoader
+from .parallelism import PipelineTrainer, PipelineDataLoader
 from .core.process_groups import ProcessGroupManager
 
 class Trainer:
@@ -86,7 +86,7 @@ class Trainer:
         self.global_rank = dist.get_rank()
 
         # Initialize optimizer and loss function
-        self.optimizer = optim.Adam(self.model.parameters(), lr=self.config['learning_rate'])
+        self.optimizer = optim.Adam(self.model.parameters(), lr=float(self.config['learning_rate']))
         self.criterion = nn.CrossEntropyLoss()
 
         # Check if pipeline parallelism is active to determine the training step strategy
@@ -114,7 +114,7 @@ class Trainer:
             self.criterion,
             self.device,
             optimizer=self.optimizer,
-            max_grad_norm=self.config['max_grad_norm'],
+            max_grad_norm=float(self.config['max_grad_norm']),
             schedule_type=self.config.get('schedule', '1f1b')
         )
         # The PipelineDataLoader wraps the train loader to handle gradient accumulation

@@ -135,6 +135,28 @@ class ProcessGroupManager:
         """
         return self.device_mesh.get_coordinates_tensor_search(rank)
 
+    def print_mesh_info(self):
+        """
+        Prints the device mesh configuration and rank assignments.
+        Only prints from global rank 0.
+        """
+        if dist.get_rank() == 0:
+            print("\n" + "="*60)
+            print("Device Mesh Configuration")
+            print("="*60)
+            print(f"Mesh Dimensions: {self.device_mesh.mesh_dim}")
+            print(f"Mesh Names:      {self.device_mesh.mesh_name}")
+            print("-" * 60)
+            print("Global Rank | Coordinates")
+            print("-" * 60)
+            
+            world_size = dist.get_world_size()
+            for rank in range(world_size):
+                coords = self.get_coordinates_tensor_search(rank)
+                coord_str = ", ".join([f"{name}={val}" for name, val in zip(self.device_mesh.mesh_name, coords)])
+                print(f"Rank {rank:3d}    | {coord_str}")
+            print("="*60 + "\n")
+
 def init_process_groups(
     device_type: str = 'cuda',
     mesh_dim: Tuple[int, ...] = (2,2,2),

@@ -14,28 +14,41 @@ __version__ = "2.0.0"
 __author__ = "QuintNet Team"
 
 # Core imports
-from .core.mesh import MeshGenerator
-from .core.process_groups import init_process_groups
-from .core.distributed import setup_distributed, cleanup_distributed
+from .strategy import (
+    BaseStrategy,
+    DataParallelStrategy,
+    TensorParallelStrategy,
+    PipelineParallelStrategy,
+    DataTensorParallelStrategy,
+    DataPipelineParallelStrategy,
+    TensorPipelineParallelStrategy,
+    Hybrid3DStrategy,
+    get_strategy,
+)
+from .core import init_process_groups, setup_distributed, cleanup_distributed
 
 # Parallelism strategies
 from .parallelism import (
     DataParallel,
     TensorParallel,
-    PipelineParallel,
+    PipelineParallelWrapper,
+    PipelineTrainer,
+    PipelineDataLoader,
     # HybridParallel
 )
 
 __all__ = [
     # Core
-    'MeshGenerator',
     'init_process_groups',
     'setup_distributed',
     'cleanup_distributed',
+    'get_strategy',
     
     # Parallelism
     'DataParallel',
     'TensorParallel',
-    'PipelineParallel',
+    'PipelineParallelWrapper',
+    'PipelineTrainer',
+    'PipelineDataLoader',
     # 'HybridParallel',
 ]
