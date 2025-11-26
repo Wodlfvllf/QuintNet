@@ -79,6 +79,13 @@ class DataParallel(nn.Module):
         super().__init__()
         
         self.model = model
+        
+    @property
+    def module(self):
+        """
+        Property to access the underlying model, for compatibility with PyTorch's DDP.
+        """
+        return self.model
         self.distributed_config = distributed_config or DistributedConfig()
         self.bucket_config = bucket_config or BucketConfig()
         self.backend = backend or TorchDistributedBackend() # Default to PyTorch's backend

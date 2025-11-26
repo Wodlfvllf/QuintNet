@@ -10,7 +10,7 @@ This module contains implementations of:
 
 from .data_parallel import DataParallel
 from .tensor_parallel import apply_tensor_parallel as TensorParallel, ColumnParallelLinear, RowParallelLinear
-from .pipeline_parallel import PipelineParallelWrapper as PipelineParallel, PipelineParallelWrapper, PipelineTrainer
+from .pipeline_parallel import PipelineParallelWrapper, PipelineTrainer, PipelineDataLoader
 
 __all__ = [
     # Data Parallel
@@ -22,7 +22,7 @@ __all__ = [
     'RowParallelLinear',
     
     # Pipeline Parallel
-    'PipelineParallel',
     'PipelineParallelWrapper',
     'PipelineTrainer',
+    'PipelineDataLoader',
 ]
