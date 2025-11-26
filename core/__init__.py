@@ -13,12 +13,12 @@ from .distributed import setup_distributed, cleanup_distributed
 from .process_groups import ProcessGroupManager, init_process_groups
 from .config import load_config
 from .communication import (
-    all_reduce,
-    all_gather,
-    reduce_scatter,
-    broadcast,
-    send,
-    recv
+    All_Reduce,
+    All_Gather,
+    ReduceScatter,
+    Broadcast,
+    Send,
+    Recv
 )
 
 __all__ = [
@@ -28,10 +28,10 @@ __all__ = [
     'cleanup_distributed',
     'ProcessGroupManager',
     'load_config',
-    'all_reduce',
-    'all_gather',
-    'reduce_scatter',
-    'broadcast',
-    'send',
-    'recv',
+    'All_Reduce',
+    'All_Gather',
+    'ReduceScatter',
+    'Broadcast',
+    'Send',
+    'Recv',
 ]
