@@ -7,7 +7,7 @@ import torch.distributed as dist
 from .main_coordinator import BaseCoordinator
 from ..core.process_groups import ProcessGroupManager
 from ..parallelism.pipeline_parallel.wrapper import PipelineParallelWrapper
-from ..parallelism.data_parallel.core.ddp import CustomDDP
+from ..parallelism.data_parallel.core.ddp import DataParallel
 
 class DPPCoordinator(BaseCoordinator):
     """
@@ -39,7 +39,7 @@ class DPPCoordinator(BaseCoordinator):
         1.  **Pipeline Parallelism (PP):** The model is first split into stages
             across the GPUs in the pipeline-parallel group.
         2.  **Data Parallelism (DP):** The entire pipeline is then replicated,
-            and `CustomDDP` is used to synchronize gradients across these replicas.
+            and `DataParallel` is used to synchronize gradients across these replicas.
 
         Returns:
             nn.Module: The fully parallelized model.
@@ -62,6 +62,6 @@ class DPPCoordinator(BaseCoordinator):
         )
 
         # --- 2. Apply Data Parallelism ---
-        dp_model = CustomDDP(pp_model)
+        dp_model = DataParallel(pp_model)
         
         return dp_model
