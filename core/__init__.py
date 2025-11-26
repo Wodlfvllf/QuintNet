@@ -17,7 +17,9 @@ from .communication import (
     All_Gather,
     ReduceScatter,
     Send,
-    Recv
+    Recv,
+    pipeline_communicate,
+    bidirectional_pipeline_communicate,
 )
 
 __all__ = [
@@ -32,4 +34,6 @@ __all__ = [
     'ReduceScatter',
     'Send',
     'Recv',
+    'pipeline_communicate',
+    'bidirectional_pipeline_communicate',
 ]

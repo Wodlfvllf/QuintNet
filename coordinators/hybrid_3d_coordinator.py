@@ -7,10 +7,10 @@ import torch.nn as nn
 import torch.distributed as dist
 import os
 from .main_coordinator import BaseCoordinator
-from ..core.process_groups import ProcessGroupManager
-from ..parallelism.tensor_parallel import apply_tensor_parallel
-from ..parallelism.pipeline_parallel import PipelineParallelWrapper
-from ..parallelism.data_parallel import DataParallel
+from ..core import ProcessGroupManager
+from ..parallelism import TensorParallel
+from ..parallelism import PipelineParallelWrapper
+from ..parallelism import DataParallel
 
 class Hybrid3DCoordinator(BaseCoordinator):
     """
@@ -63,7 +63,7 @@ class Hybrid3DCoordinator(BaseCoordinator):
         self.model.to(device)
 
         # --- 1. Apply Tensor Parallelism ---
-        tp_model = apply_tensor_parallel(
+        tp_model = TensorParallel(
             self.model,
             self.config['mesh_dim'][self.config['mesh_name'].index('tp')],
             tp_rank,

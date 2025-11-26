@@ -5,9 +5,9 @@ Coordinator for 2D Hybrid Parallelism (DP + PP).
 import torch.nn as nn
 import torch.distributed as dist
 from .main_coordinator import BaseCoordinator
-from ..core.process_groups import ProcessGroupManager
-from ..parallelism.pipeline_parallel.wrapper import PipelineParallelWrapper
-from ..parallelism.data_parallel.core.ddp import DataParallel
+from ..core import ProcessGroupManager
+from ..parallelism import PipelineParallelWrapper
+from ..parallelism import DataParallel
 
 class DPPCoordinator(BaseCoordinator):
     """

@@ -5,7 +5,7 @@ Coordinator for Data Parallelism.
 import torch.nn as nn
 import torch.distributed as dist
 from .main_coordinator import BaseCoordinator
-from ..parallelism.data_parallel.core.ddp import DataParallel
+from ..parallelism import DataParallel
 
 class DataParallelCoordinator(BaseCoordinator):
     """

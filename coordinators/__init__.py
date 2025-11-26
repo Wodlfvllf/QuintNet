@@ -6,6 +6,7 @@ from .dp_tp_coordinator import DPTCoordinator
 from .dp_pp_coordinator import DPPCoordinator
 from .tp_pp_coordinator import TPPCoordinator
 from .hybrid_3d_coordinator import Hybrid3DCoordinator
+from .main_coordinator import BaseCoordinator
 
 __all__ = [
     "DataParallelCoordinator",
@@ -15,4 +16,5 @@ __all__ = [
     "DPPCoordinator",
     "TPPCoordinator",
     "Hybrid3DCoordinator",
+    "BaseCoordinator",
 ]

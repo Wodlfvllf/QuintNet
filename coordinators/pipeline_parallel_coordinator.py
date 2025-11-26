@@ -5,8 +5,8 @@ Coordinator for Pipeline Parallelism.
 import torch.nn as nn
 import torch.distributed as dist
 from .main_coordinator import BaseCoordinator
-from ..core.process_groups import ProcessGroupManager
-from ..parallelism.pipeline_parallel.wrapper import PipelineParallelWrapper
+from ..core import ProcessGroupManager
+from ..parallelism import PipelineParallelWrapper
 
 class PipelineParallelCoordinator(BaseCoordinator):
     """

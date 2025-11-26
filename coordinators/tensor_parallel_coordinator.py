@@ -6,8 +6,8 @@ import torch
 import torch.nn as nn
 import torch.distributed as dist
 from .main_coordinator import BaseCoordinator
-from ..core.process_groups import ProcessGroupManager
-from ..parallelism.tensor_parallel.rewrite import apply_tensor_parallel
+from ..core import ProcessGroupManager
+from ..parallelism import TensorParallel
 
 class TensorParallelCoordinator(BaseCoordinator):
     """
@@ -55,7 +55,7 @@ class TensorParallelCoordinator(BaseCoordinator):
         self.model.to(self.device)
         
         # The rewrite function handles the actual replacement of layers.
-        return apply_tensor_parallel(
+        return TensorParallel(
             self.model,
             tp_size=tp_size,
             tp_rank=tp_rank,

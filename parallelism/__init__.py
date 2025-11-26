@@ -9,17 +9,12 @@ This module contains implementations of:
 """
 
 from .data_parallel import DataParallel
-from .data_parallel.components import GradientBucket, BucketManager, GradientReducer, ParameterBroadcaster
 from .tensor_parallel import apply_tensor_parallel as TensorParallel, ColumnParallelLinear, RowParallelLinear
 from .pipeline_parallel import PipelineParallelWrapper as PipelineParallel, PipelineParallelWrapper, PipelineTrainer
 
 __all__ = [
     # Data Parallel
     'DataParallel',
-    'GradientBucket',
-    'BucketManager',
-    'GradientReducer',
-    'ParameterBroadcaster',
     
     # Tensor Parallel
     'TensorParallel',

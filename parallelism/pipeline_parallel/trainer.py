@@ -24,7 +24,7 @@ It delegates the actual micro-batch scheduling to specialized schedule classes
 import torch
 import torch.nn.functional as F
 import torch.distributed as dist
-from ...core.communication import pipeline_communicate, bidirectional_pipeline_communicate
+from ...core import pipeline_communicate, bidirectional_pipeline_communicate
 from .schedule import AllFwdAllBwdSchedule, OneFOneBSchedule
 
 

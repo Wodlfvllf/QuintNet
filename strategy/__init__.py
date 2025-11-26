@@ -39,7 +39,6 @@ is being used.
 """
 
 from typing import Dict, Any
-from ..core.process_groups import ProcessGroupManager
 from .base_strategy import BaseStrategy
 from .data_parallel_strategy import DataParallelStrategy
 from .tensor_parallel_strategy import TensorParallelStrategy

@@ -33,7 +33,7 @@ from typing import Dict, Any
 import torch
 import torch.nn as nn
 import os
-from ..core.process_groups import ProcessGroupManager
+from ..core import ProcessGroupManager
 
 class BaseStrategy(ABC):
     """

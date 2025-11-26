@@ -5,9 +5,8 @@ Coordinator for 2D Hybrid Parallelism (DP + TP).
 import torch.nn as nn
 import torch.distributed as dist
 from .main_coordinator import BaseCoordinator
-from ..core.process_groups import ProcessGroupManager
-from ..parallelism.tensor_parallel.rewrite import apply_tensor_parallel
-from ..parallelism.data_parallel.core.ddp import DataParallel
+from ..core import ProcessGroupManager
+from ..parallelism import TensorParallel, DataParallel
 
 class DPTCoordinator(BaseCoordinator):
     """
@@ -54,7 +53,7 @@ class DPTCoordinator(BaseCoordinator):
         tp_size = self.config['mesh_dim'][self.config['mesh_name'].index('tp')]
         
         self.model.to(self.device)
-        tp_model = apply_tensor_parallel(
+        tp_model = TensorParallel(
             self.model,
             tp_size=tp_size,
             tp_rank=tp_rank,
