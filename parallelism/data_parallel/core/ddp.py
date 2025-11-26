@@ -45,9 +45,9 @@ from ..components.gradient_reducer import GradientReducer
 from ..components.parameter_broadcaster import ParameterBroadcaster
 from .config import DistributedConfig, BucketConfig, ReductionStrategy
 
-class CustomDDP(nn.Module):
+class DataParallel(nn.Module):
     """
-    A modular custom Distributed Data Parallel (DDP) implementation.
+    A modular Distributed Data Parallel (DDP) implementation.
 
     This class wraps a `torch.nn.Module` and orchestrates the gradient
     synchronization across multiple processes using pluggable components
