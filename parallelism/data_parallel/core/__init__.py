@@ -1,6 +1,6 @@
 """Core CustomDDP components."""
 
-from .ddp import CustomDDP
+from .ddp import DataParallel
 from .config import DistributedConfig, BucketConfig, ReductionStrategy
 
-__all__ = ["CustomDDP", "DistributedConfig", "BucketConfig", "ReductionStrategy"]
+__all__ = ["DataParallel", "DistributedConfig", "BucketConfig", "ReductionStrategy"]
