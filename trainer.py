@@ -122,13 +122,24 @@ class Trainer:
         
         # To communicate between pipeline stages, we need to know the shape of the tensors being passed.
         # This logic accesses the underlying model to get the shapes.
+        
+        # Calculate micro-batch size for correct tensor shape allocation
+        # Global Batch Size = Micro Batch Size * Grad Acc Steps * DP Size
+        dp_size = self.config['mesh_dim'][self.config['mesh_name'].index('dp')]
+        micro_batch_size = self.config['batch_size'] // (self.config['grad_acc_steps'] * dp_size)
+        
         # Note: This assumes a DDP -> PP wrapping order for the model.
-        if hasattr(self.model, 'module') and hasattr(self.model.module, 'local_module'):
+        # QuintNet's DataParallel stores the wrapped model in `self.model`, not `self.module`.
+        if hasattr(self.model, 'model') and hasattr(self.model.model, 'local_module'):
+             pipeline_wrapper = self.model.model
+             self.tensor_shapes = pipeline_wrapper.get_tensor_shapes(micro_batch_size)
+        elif hasattr(self.model, 'module') and hasattr(self.model.module, 'local_module'):
+             # Fallback for standard PyTorch DDP (if ever used)
              pipeline_wrapper = self.model.module
-             self.tensor_shapes = pipeline_wrapper.get_tensor_shapes(self.config['batch_size'])
+             self.tensor_shapes = pipeline_wrapper.get_tensor_shapes(micro_batch_size)
         else:
             # This case handles pure PP without a DDP wrapper
-            self.tensor_shapes = self.model.get_tensor_shapes(self.config['batch_size'])
+            self.tensor_shapes = self.model.get_tensor_shapes(micro_batch_size)
 
 
     def fit(self):

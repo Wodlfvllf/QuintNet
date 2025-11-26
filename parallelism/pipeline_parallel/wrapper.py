@@ -131,20 +131,31 @@ class PipelineParallelWrapper(nn.Module):
         
         # The first stage is unique: it includes the model's embedding layer.
         if self.is_first_stage:
-            # Its input is the raw image data. We save this shape for communication.
+            # For ALL stages (including the first), we need to communicate the shape
+            # of the embedding/activation tensor that flows through the pipeline.
+            # This is always (B, Seq_len, Hidden_dim).
+            
+            # We determine Seq_len dynamically from the positional embeddings.
+            # This works for both 2D and 3D models (or any model with pos_embed).
+            # pos_embed shape is (1, seq_len, hidden_dim)
+            seq_len = model.embedding.pos_embed.shape[1]
+            
             self.tensor_shapes = (
-                model.embedding.in_channels,
-                model.embedding.img_size,
-                model.embedding.img_size
+                seq_len,
+                model.blocks[0].hidden_dim # Assumes hidden_dim is consistent
             )
+
             modules.append(model.embedding)
         else:
             # Subsequent stages receive activations from the previous stage.
             # We calculate the shape of these activations for communication.
-            num_patches = (model.embedding.img_size // model.embedding.patch_size)**2
+            
+            # Same logic as above: derive from pos_embed for consistency and 3D support.
+            seq_len = model.embedding.pos_embed.shape[1]
+            
             self.tensor_shapes = (
-                num_patches + 1, # +1 for the [CLS] token
-                model.blocks[0].hidden_dim # Assumes hidden_dim is consistent
+                seq_len,
+                model.blocks[0].hidden_dim 
             )
 
         # All stages include their assigned transformer blocks.
