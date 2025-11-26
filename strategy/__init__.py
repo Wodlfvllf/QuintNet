@@ -47,6 +47,7 @@ from .dp_tp_strategy import DataTensorParallelStrategy
 from .dp_pp_strategy import DataPipelineParallelStrategy
 from .tp_pp_strategy import TensorPipelineParallelStrategy
 from .hybrid_3d_strategy import Hybrid3DStrategy
+from ..core import ProcessGroupManager
 
 def get_strategy(strategy_name: str, pg_manager: ProcessGroupManager, config: Dict[str, Any]) -> BaseStrategy:
     """
