@@ -8,16 +8,18 @@ This module contains implementations of:
 - Hybrid 3D Parallelism (DP + TP + PP)
 """
 
-from .data_parallel import CustomDDP as DataParallel, CustomDDP
+from .data_parallel import DataParallel
+from .data_parallel.components import GradientBucket, BucketManager, GradientReducer, ParameterBroadcaster
 from .tensor_parallel import apply_tensor_parallel as TensorParallel, ColumnParallelLinear, RowParallelLinear
 from .pipeline_parallel import PipelineParallelWrapper as PipelineParallel, PipelineParallelWrapper, PipelineTrainer
-# from .hybrid import HybridParallel, HybridParallelCoordinator # Hybrid module missing
 
 __all__ = [
     # Data Parallel
     'DataParallel',
-    'CustomDDP',
-
+    'GradientBucket',
+    'BucketManager',
+    'GradientReducer',
+    'ParameterBroadcaster',
     
     # Tensor Parallel
     'TensorParallel',
@@ -28,8 +30,4 @@ __all__ = [
     'PipelineParallel',
     'PipelineParallelWrapper',
     'PipelineTrainer',
-    
-    # Hybrid
-    # 'HybridParallel',
-    # 'HybridParallelCoordinator',
 ]
