@@ -33,7 +33,7 @@ synchronized weights during the training process.
 
 import torch.distributed as dist
 
-from .backends.base import DistributedBackend
+from ..backends.base import DistributedBackend
 from ..core.config import DistributedConfig, ReductionStrategy
 from .bucket import GradientBucket
 
