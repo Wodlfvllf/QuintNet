@@ -1,7 +1,7 @@
 """
-Tests for Data Parallelism (CustomDDP).
+Tests for Data Parallelism (DataParallel).
 
-This module contains unit tests for the `CustomDDP` implementation, ensuring
+This module contains unit tests for the `DataParallel` implementation, ensuring
 that it correctly synchronizes gradients across multiple processes.
 
 ===============================================================================
@@ -9,23 +9,23 @@ CONCEPTUAL OVERVIEW:
 ===============================================================================
 
 Distributed Data Parallel (DDP) is a core strategy for scaling training.
-The `CustomDDP` implementation aims to provide a modular and efficient way
+The `DataParallel` implementation aims to provide a modular and efficient way
 to achieve this. This test verifies the most critical aspect of DDP:
 -   **Gradient Synchronization**: After each backward pass, the gradients
     computed on each model replica must be averaged across all participating
-    processes. This test ensures that `CustomDDP` performs this averaging
+    processes. This test ensures that `DataParallel` performs this averaging
     correctly, resulting in identical gradients on all ranks, which also
     match a manually computed averaged gradient.
 
 The test works by:
-1.  Initializing two identical models: one to be wrapped by `CustomDDP` and
+1.  Initializing two identical models: one to be wrapped by `DataParallel` and
     one to serve as a reference for manual gradient calculation.
-2.  Performing a forward and backward pass on the `CustomDDP` wrapped model
+2.  Performing a forward and backward pass on the `DataParallel` wrapped model
     with different data on each rank.
 3.  Manually simulating the DDP behavior on the reference model: collecting
     all data, running a single forward/backward pass, and then averaging
     the gradients.
-4.  Comparing the gradients from the `CustomDDP` model with the manually
+4.  Comparing the gradients from the `DataParallel` model with the manually
     averaged gradients from the reference model.
 
 This test is marked with `@pytest.mark.world_size(N)` to indicate the
@@ -39,16 +39,16 @@ import pytest
 import torch
 import torch.nn as nn
 import torch.distributed as dist
-from ..parallelism.data_parallel import CustomDDP
-from ..core.process_groups import ProcessGroupManager # Used for consistency, though not strictly by CustomDDP itself
+from ..parallelism.data_parallel import DataParallel
+from ..core.process_groups import ProcessGroupManager # Used for consistency, though not strictly by DataParallel itself
 
 @pytest.mark.world_size(2)
 def test_ddp_gradient_synchronization(distributed_env, device):
     """
-    Tests that `CustomDDP` correctly synchronizes gradients across ranks.
+    Tests that `DataParallel` correctly synchronizes gradients across ranks.
 
     This test verifies that after a backward pass, the gradients of the
-    `CustomDDP` wrapped model are identical across all ranks and match
+    `DataParallel` wrapped model are identical across all ranks and match
     the gradients obtained from a manually averaged reference model.
 
     This test requires a world size of 2.
@@ -73,17 +73,17 @@ def test_ddp_gradient_synchronization(distributed_env, device):
         dist.broadcast(model_ddp.weight, src=0)
         model_ref.weight.copy_(model_ddp.weight)
 
-    # Wrap one model with CustomDDP
+    # Wrap one model with DataParallel
     # The ProcessGroupManager is created for consistency with other tests,
-    # but CustomDDP itself can use the default process group if not specified.
+    # but DataParallel itself can use the default process group if not specified.
     pg_manager = ProcessGroupManager(mesh_dim=(world_size, 1), mesh_name=('dp', 'tp'))
-    ddp_model = CustomDDP(model_ddp, distributed_config=pg_manager.config) # Pass distributed config if needed
+    ddp_model = DataParallel(model_ddp, distributed_config=pg_manager.config) # Pass distributed config if needed
 
     # Create different input data for each rank
     input_tensor = torch.randn(4, 10).to(device)
     
     # --- DDP Model Forward/Backward Pass ---
-    # This will trigger CustomDDP's gradient bucketing and all-reduce.
+    # This will trigger DataParallel's gradient bucketing and all-reduce.
     output_ddp = ddp_model(input_tensor)
     loss_ddp = output_ddp.sum()
     loss_ddp.backward()
@@ -114,7 +114,7 @@ def test_ddp_gradient_synchronization(distributed_env, device):
     # The gradients on the DDP model's parameters should now be very close to
     # the manually averaged gradients on the reference model.
     assert torch.allclose(ddp_model.model.weight.grad, model_ref.weight.grad, atol=1e-6), \
-        f"Gradients do not match between CustomDDP and reference model on rank {rank}."
+        f"Gradients do not match between DataParallel and reference model on rank {rank}."
 
     # As an extra check, the gradients on both ranks of the DDP model should be identical.
     # We gather the DDP model's gradients from all ranks and compare them.

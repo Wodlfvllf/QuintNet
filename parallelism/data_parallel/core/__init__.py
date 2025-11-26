@@ -1,4 +1,4 @@
-"""Core CustomDDP components."""
+"""Core DataParallel components."""
 
 from .ddp import DataParallel
 from .config import DistributedConfig, BucketConfig, ReductionStrategy

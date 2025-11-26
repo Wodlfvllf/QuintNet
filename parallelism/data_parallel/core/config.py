@@ -1,7 +1,7 @@
 """
-Configuration Classes for CustomDDP
+Configuration Classes for DataParallel
 
-This module defines dataclasses and enums for configuring the `CustomDDP`
+This module defines dataclasses and enums for configuring the `DataParallel`
 implementation. These configurations control various aspects of distributed
 data parallelism, including gradient bucketing, reduction strategies, and
 distributed environment settings.
@@ -11,7 +11,7 @@ CONCEPTUAL OVERVIEW:
 ===============================================================================
 
 The configuration classes provide a structured way to pass settings to the
-`CustomDDP` components.
+`DataParallel` components.
 
 -   **`ReductionStrategy`**: An Enum defining how gradients are aggregated
     (e.g., sum or mean).
@@ -47,7 +47,7 @@ class ReductionStrategy(Enum):
 @dataclass
 class BucketConfig:
     """
-    Configuration for gradient bucketing in `CustomDDP`.
+    Configuration for gradient bucketing in `DataParallel`.
 
     Attributes:
         capacity_mb (int): The maximum size of a gradient bucket in megabytes.
@@ -65,7 +65,7 @@ class BucketConfig:
 @dataclass
 class DistributedConfig:
     """
-    Configuration for the distributed training environment within `CustomDDP`.
+    Configuration for the distributed training environment within `DataParallel`.
 
     Attributes:
         rank (int): The global rank of the current process.

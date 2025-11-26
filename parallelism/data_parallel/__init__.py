@@ -1,5 +1,5 @@
 """
-CustomDDP: A modular distributed data parallel implementation.
+DataParallel: A modular distributed data parallel implementation.
 """
 
 from .core import DataParallel

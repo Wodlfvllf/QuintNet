@@ -1,4 +1,4 @@
-"""Factory functions for creating CustomDDP instances."""
+"""Factory functions for creating DataParallel instances."""
 
 import torch
 import torch.distributed as dist
@@ -10,8 +10,8 @@ from ..backends.local_backend import LocalBackend
 from ..backends.torch_backend import TorchDistributedBackend
 
 def create_local_ddp(model: torch.nn.Module, bucket_config: Optional[BucketConfig] = None) -> DataParallel:
-    """Create a CustomDDP instance for local (non-distributed) training."""
-    return CustomDDP(
+    """Create a DataParallel instance for local (non-distributed) training."""
+    return DataParallel(
         model=model,
         distributed_config=DistributedConfig(),
         bucket_config=bucket_config or BucketConfig(),
@@ -24,9 +24,9 @@ def create_distributed_ddp(
     world_size: int,
     process_group: Optional[dist.ProcessGroup] = None,
     bucket_config: Optional[BucketConfig] = None,
-) -> CustomDDP:
-    """Create a CustomDDP instance for distributed training."""
-    return CustomDDP(
+) -> DataParallel:
+    """Create a DataParallel instance for distributed training."""
+    return DataParallel(
         model=model,
         distributed_config=DistributedConfig(
             rank=rank,

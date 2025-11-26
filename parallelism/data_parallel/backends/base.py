@@ -2,8 +2,8 @@
 Abstract Base Class for Distributed Backends
 
 This module defines the abstract interface for distributed communication
-backends used within the `CustomDDP` implementation. By abstracting the
-communication primitives, `CustomDDP` can be made agnostic to the specific
+backends used within the `DataParallel` implementation. By abstracting the
+communication primitives, `DataParallel` can be made agnostic to the specific
 distributed library (e.g., PyTorch's `torch.distributed`, MPI, etc.).
 
 ===============================================================================
@@ -16,7 +16,7 @@ and performing all-reduce operations. Any concrete implementation of this
 abstract class must provide these methods.
 
 This design promotes modularity and extensibility, allowing different
-distributed communication libraries to be plugged into the `CustomDDP`
+distributed communication libraries to be plugged into the `DataParallel`
 framework without modifying its core logic.
 
 ===============================================================================
@@ -32,7 +32,7 @@ class DistributedBackend(ABC):
     Abstract interface for distributed communication backends.
 
     This class defines the essential communication primitives that any
-    distributed backend must implement to be compatible with `CustomDDP`.
+    distributed backend must implement to be compatible with `DataParallel`.
     """
     
     @abstractmethod

@@ -12,7 +12,7 @@ CONCEPTUAL OVERVIEW:
 The `TorchDistributedBackend` acts as a bridge between the abstract
 `DistributedBackend` interface and PyTorch's native distributed functionalities.
 It wraps `torch.distributed` calls for `is_initialized`, `broadcast`,
-`all_reduce`, and `get_world_size`, ensuring that `CustomDDP` can
+`all_reduce`, and `get_world_size`, ensuring that `DataParallel` can
 seamlessly integrate with PyTorch's distributed environment.
 
 This separation allows for potential future extensions where other distributed

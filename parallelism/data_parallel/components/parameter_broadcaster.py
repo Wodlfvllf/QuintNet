@@ -59,11 +59,11 @@ class ParameterBroadcaster:
             return
         
         # Print a message to indicate the start of broadcasting, only on the current rank.
-        print(f"CustomDDP Rank {self.config.rank}: Broadcasting parameters from rank 0")
+        print(f"DataParallel Rank {self.config.rank}: Broadcasting parameters from rank 0")
         
         # Iterate through all parameters of the model and broadcast their data.
         for param in model.parameters():
             self.backend.broadcast_tensor(tensor=param.data, src=0, group=self.config.process_group)
 
         # Print a message to indicate completion, only on the current rank.
-        print(f"CustomDDP Rank {self.config.rank}: Parameter broadcast complete")
+        print(f"DataParallel Rank {self.config.rank}: Parameter broadcast complete")

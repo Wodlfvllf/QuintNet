@@ -15,7 +15,7 @@ replica of the model and processes a different batch of data. After the
 forward and backward passes, the gradients from all model replicas are
 averaged to ensure that all replicas maintain synchronized weights.
 
-This `CustomDDP` implementation breaks down the DDP functionality into
+This `DataParallel` implementation breaks down the DDP functionality into
 pluggable components:
 
 -   **`DistributedConfig`**: Defines basic distributed environment settings.
@@ -63,7 +63,7 @@ class DataParallel(nn.Module):
         reduction_strategy: ReductionStrategy = ReductionStrategy.MEAN,
     ):
         """
-        Initializes the CustomDDP wrapper.
+        Initializes the DataParallel wrapper.
 
         Args:
             model (nn.Module): The model to be wrapped for data parallelism.
@@ -93,7 +93,7 @@ class DataParallel(nn.Module):
     
     def _setup(self) -> None:
         """
-        Performs the initial setup for the DDP wrapper.
+        Performs the initial setup for the DataParallel wrapper.
 
         This includes creating gradient buckets, broadcasting initial parameters
         to ensure all model replicas are identical, and registering hooks
@@ -152,7 +152,7 @@ class DataParallel(nn.Module):
     
     def __del__(self):
         """
-        Destructor to ensure gradient hooks are removed when the CustomDDP
+        Destructor to ensure gradient hooks are removed when the DataParallel
         object is garbage collected.
         """
         try:

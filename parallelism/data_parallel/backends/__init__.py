@@ -1,4 +1,4 @@
-"""Distributed backends for CustomDDP."""
+"""Distributed backends for DataParallel."""
 
 from .base import DistributedBackend
 from .torch_backend import TorchDistributedBackend
