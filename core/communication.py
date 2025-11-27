@@ -242,47 +242,59 @@ def pipeline_communicate(operation: str,
     global STEP
     global VERBOSE
     
+    rank = dist.get_rank()
+    
+    # Determine source/destination group ranks
+    src_group_rank = None
+    dest_group_rank = None
+    
     if operation == 'recv_forward':
-        # First stage receives input from dataloader, not from previous stage
-        if is_first_stage:
-            return None
-        # For receiving, we need to know the source rank
-        src = pp_rank - 1
-        # Use Recv autograd function to receive the tensor
-        return Recv.apply(src, device, pp_group, dtype)
+        if is_first_stage: return None
+        src_group_rank = pp_rank - 1
+        tensor = torch.empty(shapes, requires_grad=True, device=device, dtype=dtype)
         
     elif operation == 'send_forward':
-        # Last stage doesn't send forward activations (it computes loss)
-        if is_last_stage:
-            return None
-        # For sending, we need to know the destination rank and the tensor to send
-        dest = pp_rank + 1
-        if tensor is None:
-            raise ValueError("Tensor must be provided for send_forward operation.")
-        # Use Send autograd function to send the tensor
-        return Send.apply(tensor, dest, pp_group)
+        if is_last_stage: return None
+        dest_group_rank = pp_rank + 1
         
     elif operation == 'recv_backward':
-        # Last stage doesn't receive backward gradients (it initiates backward pass)
-        if is_last_stage:
-            return None
-        # For receiving, we need to know the source rank
-        src = pp_rank + 1
-        # Use Recv autograd function to receive the gradient
-        return Recv.apply(src, device, pp_group, dtype)
+        if is_last_stage: return None
+        src_group_rank = pp_rank + 1
+        tensor = torch.empty(shapes, requires_grad=True, device=device, dtype=dtype)
         
     elif operation == 'send_backward':
-        # First stage doesn't send backward gradients (it's the end of the backward pass)
-        if is_first_stage:
-            return None
-        # For sending, we need to know the destination rank and the tensor to send
-        dest = pp_rank - 1
-        if tensor is None:
-            raise ValueError("Tensor must be provided for send_backward operation.")
-        # Use Send autograd function to send the gradient
-        return Send.apply(tensor, dest, pp_group)
+        if is_first_stage: return None
+        dest_group_rank = pp_rank - 1
+        
     else:
         raise ValueError(f"Unknown operation: {operation}")
+
+    is_send = operation.startswith('send')
+    
+    # Get the peer's group rank and convert to global rank
+    peer_group_rank = dest_group_rank if is_send else src_group_rank
+    peer_global_rank = dist.get_global_rank(pp_group, peer_group_rank)
+    
+    # Create the P2P operation
+    # Note: For send, we use the passed 'tensor'. For recv, we use the newly allocated 'tensor'.
+    op = dist.P2POp(dist.isend if is_send else dist.irecv, tensor, peer_global_rank, group=pp_group)
+    
+    if VERBOSE: 
+        direction = '→' if is_send else '←'
+        print(f"{operation} | {'sending' if is_send else 'receiving'} {operation.split('_')[1]} "
+              f"{pp_rank} {direction} {peer_group_rank} (global {peer_global_rank}) | "
+              f"STEP:{STEP} | RANK:{pp_rank}", flush=True)
+    
+    # Execute the operation
+    reqs = dist.batch_isend_irecv([op])
+    for req in reqs:
+        req.wait()
+    torch.cuda.synchronize()
+    
+    if VERBOSE: 
+        STEP += 1
+        
+    return tensor if not is_send else None
 
 
 def bidirectional_pipeline_communicate(operation: str, 
@@ -321,34 +333,33 @@ def bidirectional_pipeline_communicate(operation: str,
     global STEP
     global VERBOSE
     
-    is_fwd_send_bwd_recv = (operation == 'send_fwd_recv_bwd')
+    is_fwd = (operation == 'send_fwd_recv_bwd')
     
-    # Boundary conditions: first/last stages don't do bidirectional communication
-    # If sending forward, the last stage doesn't send.
-    # If sending backward, the first stage doesn't send.
-    if (is_fwd_send_bwd_recv and is_last_stage) or (not is_fwd_send_bwd_recv and is_first_stage):
+    # Boundary conditions
+    if (is_fwd and is_last_stage) or (not is_fwd and is_first_stage):
         return None
     
-    # Determine peer rank based on operation
-    peer_rank = pp_rank + 1 if is_fwd_send_bwd_recv else pp_rank - 1
+    # Determine peer rank
+    peer_group_rank = pp_rank + 1 if is_fwd else pp_rank - 1
+    peer_global_rank = dist.get_global_rank(pp_group, peer_group_rank)
     
     # Allocate receive buffer
     recv_tensor = torch.empty(recv_shapes, requires_grad=True, device=device, dtype=dtype)
     
     # Create bidirectional operations using P2POp
-    # The order of operations in batch_isend_irecv matters for deadlock avoidance
-    # but here we are doing send and recv to the same peer, so it's fine.
-    reqs = dist.batch_isend_irecv([
-        dist.P2POp(dist.isend, send_tensor.contiguous(), peer_rank, group=pp_group),
-        dist.P2POp(dist.irecv, recv_tensor, peer_rank, group=pp_group)
-    ])
+    ops = [
+        dist.P2POp(dist.isend, send_tensor, peer_global_rank, group=pp_group),
+        dist.P2POp(dist.irecv, recv_tensor, peer_global_rank, group=pp_group)
+    ]
+    
+    reqs = dist.batch_isend_irecv(ops)
     
     if VERBOSE:
-        send_dir = 'next' if is_fwd_send_bwd_recv else 'prev'
-        recv_dir = 'prev' if is_fwd_send_bwd_recv else 'next' # Recv is always from the peer
-        print(f"{operation} | rank {pp_rank} sending {send_dir} to {peer_rank} | "
-              f"receiving {recv_dir} from {peer_rank} | "
-              f"STEP={STEP} | RANK:{pp_rank}", flush=True)
+        send_dir = 'next' if is_fwd else 'prev'
+        recv_dir = 'next' if is_fwd else 'prev'
+        print(f"{operation} | sending {send_dir} {pp_rank} -> {peer_group_rank} | "
+              f"receiving {recv_dir} {peer_group_rank} -> {pp_rank} | "
+              f"STEP {STEP=} | RANK:{pp_rank}", flush=True)
     
     # Wait for both operations to complete
     for req in reqs:

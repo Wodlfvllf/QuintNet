@@ -283,7 +283,10 @@ class OneFOneBSchedule(PipelineSchedule):
         
         # ===== WARMUP PHASE =====
         # Only forward passes are executed to fill the pipeline.
-        for _ in range(num_warmup_microbatches):
+        rank = dist.get_rank()
+        print(f"[Rank {rank}] 1F1B: START Warmup Phase ({num_warmup_microbatches} steps)", flush=True)
+        for i in range(num_warmup_microbatches):
+            print(f"[Rank {rank}] 1F1B: Warmup step {i}", flush=True)
             input_tensor = pipeline_communicate(
                 operation='recv_forward',
                 pp_group=trainer.pp_group,
@@ -308,10 +311,12 @@ class OneFOneBSchedule(PipelineSchedule):
             )
             input_tensors.append(input_tensor)
             output_tensors.append(output_tensor)
+        print(f"[Rank {rank}] 1F1B: END Warmup Phase", flush=True)
         
         # ===== STEADY STATE (1F1B) =====
         # Forward and backward passes happen concurrently.
         # This phase starts by receiving a forward activation from the previous stage (if any).
+        print(f"[Rank {rank}] 1F1B: START Steady State ({num_microbatches_remaining} steps)", flush=True)
         if num_microbatches_remaining > 0:
             input_tensor = pipeline_communicate(
                 operation='recv_forward',
@@ -325,6 +330,7 @@ class OneFOneBSchedule(PipelineSchedule):
             )
         
         for microbatch_idx in range(num_microbatches_remaining):
+            print(f"[Rank {rank}] 1F1B: Steady State step {microbatch_idx}", flush=True)
             is_last_iteration = (microbatch_idx == num_microbatches_remaining - 1)
             
             # Forward pass for current micro-batch
@@ -388,10 +394,13 @@ class OneFOneBSchedule(PipelineSchedule):
                     is_last_stage=trainer.is_last_stage,
                     shapes=tensor_shapes
                 )
+        print(f"[Rank {rank}] 1F1B: END Steady State", flush=True)
         
         # ===== COOLDOWN PHASE =====
         # Only backward passes are executed to clear the pipeline.
+        print(f"[Rank {rank}] 1F1B: START Cooldown Phase", flush=True)
         for warmup_idx in range(num_warmup_microbatches):
+            print(f"[Rank {rank}] 1F1B: Cooldown step {warmup_idx}", flush=True)
             # Retrieve remaining stored inputs and outputs
             input_tensor = input_tensors.pop(0)
             output_tensor = output_tensors.pop(0)
@@ -426,6 +435,7 @@ class OneFOneBSchedule(PipelineSchedule):
                 is_last_stage=trainer.is_last_stage,
                 shapes=tensor_shapes    
             )
+        print(f"[Rank {rank}] 1F1B: END Cooldown Phase", flush=True)
         
         # Perform optimizer step after all gradients have been accumulated
         if trainer.optimizer is not None:

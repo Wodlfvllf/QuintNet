@@ -107,7 +107,11 @@ class PipelineTrainer:
         Returns:
             Tuple of (loss, accuracy) - only on the last rank of the pipeline.
         """
-        return self.schedule.train_step(data_loader, tensor_shapes, device, dtype)
+        rank = dist.get_rank()
+        print(f"[Rank {rank}] PipelineTrainer: START train_step", flush=True)
+        res = self.schedule.train_step(data_loader, tensor_shapes, device, dtype)
+        print(f"[Rank {rank}] PipelineTrainer: END train_step", flush=True)
+        return res
     
     def evaluate(self, val_loader, tensor_shapes, device, dtype):
         """
