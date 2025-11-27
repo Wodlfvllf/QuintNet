@@ -141,9 +141,14 @@ class BucketManager:
                 # counter for gradients received in this bucket.
                 bucket = self.buckets[bucket_id]
                 bucket.increment_gradient_count()
+                
+                # import torch.distributed as dist
+                # rank = dist.get_rank()
+                # print(f"[Rank {rank}] BucketManager: Gradient received for bucket {bucket_id}", flush=True)
 
                 # If all gradients for this bucket have arrived, trigger the callback.
                 if bucket.are_all_gradients_ready():
+                    # print(f"[Rank {rank}] BucketManager: Bucket {bucket_id} ready", flush=True)
                     bucket_ready_callback(bucket_id)
                 return grad
             return hook

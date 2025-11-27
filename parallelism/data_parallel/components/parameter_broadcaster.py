@@ -59,7 +59,7 @@ class ParameterBroadcaster:
             return
         
         # Print a message to indicate the start of broadcasting, only on the current rank.
-        print(f"DataParallel Rank {self.config.rank}: Broadcasting parameters from rank 0")
+        print(f"DataParallel Rank {self.config.rank}: Broadcasting parameters from rank 0", flush=True)
         
         # Iterate through all parameters of the model and broadcast their data.
         for param in model.parameters():

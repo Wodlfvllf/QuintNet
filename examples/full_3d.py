@@ -32,10 +32,6 @@ def main():
     dist.init_process_group(backend="nccl")
     global_rank = dist.get_rank()
 
-    # Setup per-rank logging
-    from ..utils.logger import setup_rank_logging
-    setup_rank_logging()
-
     # Initialize the ProcessGroupManager
     pg_manager = init_process_groups(
         device_type=config['device_type'],

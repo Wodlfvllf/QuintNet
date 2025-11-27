@@ -86,5 +86,6 @@ class Hybrid3DCoordinator(BaseCoordinator):
 
         # --- 3. Apply Data Parallelism ---
         dp_model = DataParallel(pp_model)
+        print(f"[Rank {global_rank}] Hybrid3DCoordinator: Created dp_model of type {type(dp_model)}", flush=True)
 
         return dp_model

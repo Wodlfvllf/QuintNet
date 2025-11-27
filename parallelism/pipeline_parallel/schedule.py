@@ -263,7 +263,7 @@ class OneFOneBSchedule(PipelineSchedule):
             # print(f"[Rank {rank}] _forward_step: Got batch", flush=True)
             
             if trainer.is_first_stage:
-                print(f"[Rank {rank}] _forward_step: Calling model.forward (Stage 0)", flush=True)
+                print(f"[Rank {rank}] _forward_step: Calling model.forward (Stage 0). Model type: {type(trainer.model)}", flush=True)
                 output_tensor = trainer.model.forward(batch["images"].to(device))
                 print(f"[Rank {rank}] _forward_step: Finished model.forward (Stage 0)", flush=True)
             else:

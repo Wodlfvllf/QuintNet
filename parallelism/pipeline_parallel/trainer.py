@@ -77,6 +77,8 @@ class PipelineTrainer:
         self.device_mesh = device_mesh
         self.rank = pp_rank
         self.world_size = dist.get_world_size(group=pp_group)
+        
+        print(f"[Rank {pp_rank}] PipelineTrainer initialized with model type: {type(self.model)}", flush=True)
 
         # Track metrics during training (used by schedule classes)
         self.batch_labels = []
