@@ -192,7 +192,11 @@ class PipelineParallelWrapper(nn.Module):
         Returns:
             torch.Tensor: The output activation tensor to be passed to the next stage.
         """
-        return self.local_module(x)
+        rank = dist.get_rank()
+        print(f"[Rank {rank}] PipelineParallelWrapper: START forward", flush=True)
+        res = self.local_module(x)
+        print(f"[Rank {rank}] PipelineParallelWrapper: END forward", flush=True)
+        return res
     
     def backward(self, input_tensor: torch.Tensor, output_tensor: torch.Tensor, output_tensor_grad: torch.Tensor) -> torch.Tensor:
         """

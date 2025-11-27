@@ -110,6 +110,9 @@ class ColumnParallelLinear(nn.Module):
             torch.Tensor: The output tensor, either local or all-gathered,
                 depending on `gather_output`.
         """
+        rank = dist.get_rank()
+        print(f"[Rank {rank}] ColumnParallelLinear: START forward", flush=True)
+
         # Move input to the local device if needed
         if x.device != self.device:
             x = x.to(self.device, non_blocking=True)
@@ -121,11 +124,15 @@ class ColumnParallelLinear(nn.Module):
             # If `gather_output` is True, combine outputs from all ranks.
             # The custom `All_Gather.apply` function handles both forward
             # communication and backward gradient synchronization.
-            return All_Gather.apply(local_out, self.tp_group, self.gather_mode)
+            print(f"[Rank {rank}] ColumnParallelLinear: Calling All_Gather", flush=True)
+            res = All_Gather.apply(local_out, self.tp_group, self.gather_mode)
+            print(f"[Rank {rank}] ColumnParallelLinear: Finished All_Gather", flush=True)
+            return res
         else:
             # If `gather_output` is False, return only the local shard.
             # This is typically used when the next layer is `RowParallelLinear`
             # and expects sharded input.
+            print(f"[Rank {rank}] ColumnParallelLinear: END forward (no gather)", flush=True)
             return local_out
 
 
@@ -188,6 +195,9 @@ class RowParallelLinear(nn.Module):
         Returns:
             torch.Tensor: The all-reduced output tensor.
         """
+        rank = dist.get_rank()
+        print(f"[Rank {rank}] RowParallelLinear: START forward", flush=True)
+        
         # Move input to the local device if needed
         if x.device != self.device:
             x = x.to(self.device, non_blocking=True)
@@ -210,11 +220,14 @@ class RowParallelLinear(nn.Module):
         # All-reduce partial outputs from all ranks to get the complete sum
         # The custom `All_Reduce.apply` function handles both forward
         # communication and backward gradient synchronization.
+        print(f"[Rank {rank}] RowParallelLinear: Calling All_Reduce", flush=True)
         local_out = All_Reduce.apply(local_out, self.tp_group)
+        print(f"[Rank {rank}] RowParallelLinear: Finished All_Reduce", flush=True)
         
         if self.bias is not None:
             local_out = local_out + self.bias
             
+        print(f"[Rank {rank}] RowParallelLinear: END forward", flush=True)
         return local_out
 
 
@@ -270,6 +283,9 @@ class VocabParallelEmbedding(nn.Module):
         Returns:
             torch.Tensor: The all-reduced embedding vectors.
         """
+        rank = dist.get_rank()
+        print(f"[Rank {rank}] VocabParallelEmbedding: START forward", flush=True)
+        
         # Ensure input on proper device
         if input_ids.device != self.device:
             input_ids = input_ids.to(self.device, non_blocking=True)
@@ -289,4 +305,7 @@ class VocabParallelEmbedding(nn.Module):
         # All-reduce to combine embeddings from all ranks. Tokens not in a rank's
         # vocabulary will have zero embeddings from that rank, so the all-reduce
         # effectively gathers the correct embedding from the responsible rank.
-        return All_Reduce.apply(embeddings, self.tp_group)
+        print(f"[Rank {rank}] VocabParallelEmbedding: Calling All_Reduce", flush=True)
+        res = All_Reduce.apply(embeddings, self.tp_group)
+        print(f"[Rank {rank}] VocabParallelEmbedding: Finished All_Reduce", flush=True)
+        return res
