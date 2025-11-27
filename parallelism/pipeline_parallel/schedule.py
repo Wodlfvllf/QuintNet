@@ -257,12 +257,19 @@ class OneFOneBSchedule(PipelineSchedule):
         
         def _forward_step(input_tensor):
             """Helper function for performing a micro-batch forward pass."""
+            rank = dist.get_rank()
+            # print(f"[Rank {rank}] _forward_step: Getting batch", flush=True)
             batch = next(data_loader)
+            # print(f"[Rank {rank}] _forward_step: Got batch", flush=True)
             
             if trainer.is_first_stage:
+                print(f"[Rank {rank}] _forward_step: Calling model.forward (Stage 0)", flush=True)
                 output_tensor = trainer.model.forward(batch["images"].to(device))
+                print(f"[Rank {rank}] _forward_step: Finished model.forward (Stage 0)", flush=True)
             else:
+                print(f"[Rank {rank}] _forward_step: Calling model.forward (Stage > 0)", flush=True)
                 output_tensor = trainer.model.forward(input_tensor)
+                print(f"[Rank {rank}] _forward_step: Finished model.forward (Stage > 0)", flush=True)
             
             # On the last stage, calculate loss and track accuracy
             if trainer.is_last_stage:
