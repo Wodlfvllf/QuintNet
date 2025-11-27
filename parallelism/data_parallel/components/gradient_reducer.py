@@ -84,11 +84,14 @@ class GradientReducer:
             
             # 2. Perform the all-reduce operation using the configured backend.
             if self.backend.is_initialized():
+                rank = dist.get_rank()
+                print(f"[Rank {rank}] GradientReducer: START reduce_bucket {bucket.bucket_id}", flush=True)
                 self.backend.all_reduce_tensor(
                     flattened_tensor, 
                     dist.ReduceOp.SUM, # Always sum during all-reduce, then divide for mean
                     self.config.process_group
                 )
+                print(f"[Rank {rank}] GradientReducer: END reduce_bucket {bucket.bucket_id}", flush=True)
                 
                 # 3. Apply the reduction strategy (e.g., divide by world size for mean).
                 world_size = self.backend.get_world_size(self.config.process_group)
