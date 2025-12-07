@@ -1,24 +1,27 @@
-# Pipeline Parallel (PP) Training Configuration
+# Pipeline Parallel Configuration
+# Use: torchrun --nproc_per_node=4 -m QuintNet.examples.simple_pp --config QuintNet/examples/pp_config.yaml
+
+# Training
 dataset_path: /mnt/dataset/mnist/
-batch_size: 8
+batch_size: 32
 num_workers: 2
-num_epochs: 10
+num_epochs: 5
 learning_rate: 1e-4
-grad_acc_steps: 4
+grad_acc_steps: 4        # Required for pipeline parallelism
+max_grad_norm: 1.0
 patience: 5
 
-# Model Configuration
+# Model
 img_size: 28
 patch_size: 4
 hidden_dim: 64
 in_channels: 1
 n_heads: 4
-depth: 8
+depth: 8                 # 8 transformer blocks, split across 4 GPUs
 
-# Parallelism Configuration
+# Parallelism - Pure Pipeline Parallel
 device_type: cuda
-mesh_dim: [1, 4, 1]  # 4 GPUs for Pipeline Parallelism
-mesh_name: ['dp', 'pp', 'tp']
+mesh_dim: [4]            # 4 pipeline stages
+mesh_name: ['pp']        # Only pipeline parallelism
 strategy_name: 'pp'
-schedule: '1f1b'
-max_grad_norm: 1.0
+schedule: '1f1b'         # One Forward One Backward schedule
