@@ -236,13 +236,6 @@ Each module contains detailed docstrings explaining the concepts. Key files to r
 - `core/communication.py` - Distributed primitives with autograd support
 - `parallelism/data_parallel/core/ddp.py` - DDP implementation details
 
-## 🤝 Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request.
-
-## 📄 License
-
-QuintNet is licensed under the MIT License.
 
 ---
 
