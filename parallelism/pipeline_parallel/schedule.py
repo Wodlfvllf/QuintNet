@@ -359,7 +359,6 @@ class OneFOneBSchedule(PipelineSchedule):
                 dtype=dtype,
                 is_first_stage=trainer.is_first_stage,
                 is_last_stage=trainer.is_last_stage,
-                shapes=tensor_shapes
             )
             
             # Store current micro-batch's inputs/outputs for its backward pass
@@ -404,7 +403,6 @@ class OneFOneBSchedule(PipelineSchedule):
                     dtype=dtype,
                     is_first_stage=trainer.is_first_stage,
                     is_last_stage=trainer.is_last_stage,
-                    shapes=tensor_shapes
                 )
         print(f"[Rank {rank}] 1F1B: END Steady State", flush=True)
         
