@@ -137,7 +137,10 @@ class PipelineTrainer:
         total_samples = 0
         
         with torch.no_grad():
-            for batch in val_loader:
+            rank = dist.get_rank()
+            print(f"[Rank {rank}] PipelineTrainer: START evaluate loop", flush=True)
+            for i, batch in enumerate(val_loader):
+                # print(f"[Rank {rank}] PipelineTrainer: Evaluating batch {i}", flush=True)
                 # Receive activation from previous stage
                 input_tensor = pipeline_communicate(
                     operation='recv_forward',

@@ -264,7 +264,12 @@ class OneFOneBSchedule(PipelineSchedule):
             
             if trainer.is_first_stage:
                 print(f"[Rank {rank}] _forward_step: Calling model.forward (Stage 0). Model type: {type(trainer.model)}", flush=True)
-                output_tensor = trainer.model.forward(batch["images"].to(device))
+                
+                print(f"[Rank {rank}] _forward_step: Moving input to device {device} (Current CUDA device: {torch.cuda.current_device()})...", flush=True)
+                input_tensor = batch["images"].to(device)
+                print(f"[Rank {rank}] _forward_step: Input moved. Calling forward...", flush=True)
+                
+                output_tensor = trainer.model.forward(input_tensor)
                 print(f"[Rank {rank}] _forward_step: Finished model.forward (Stage 0)", flush=True)
             else:
                 print(f"[Rank {rank}] _forward_step: Calling model.forward (Stage > 0)", flush=True)
