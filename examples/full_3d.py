@@ -29,7 +29,11 @@ def main():
     config = load_config(args.config)
 
     # Initialize distributed environment
-    dist.init_process_group(backend="nccl")
+    # Initialize distributed environment
+    # Explicitly set the device based on LOCAL_RANK to avoid NCCL hangs
+    local_rank = int(os.environ.get("LOCAL_RANK", 0))
+    torch.cuda.set_device(local_rank)
+    dist.init_process_group(backend="nccl", device_id=torch.device(f"cuda:{local_rank}"))
     global_rank = dist.get_rank()
 
     # Initialize the ProcessGroupManager
