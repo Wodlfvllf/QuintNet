@@ -184,12 +184,15 @@ class Trainer:
         
         if self.is_pipeline:
             # For pipeline parallelism, we use the specialized PipelineTrainer's train_step
-            return self.pipeline_trainer.train_step(
+            # print(f"[Rank {self.global_rank}] Trainer: Calling pipeline_trainer.train_step", flush=True)
+            res = self.pipeline_trainer.train_step(
                 self.train_loader,
                 self.tensor_shapes,
                 self.device,
                 torch.float32,
             )
+            # print(f"[Rank {self.global_rank}] Trainer: Finished pipeline_trainer.train_step", flush=True)
+            return res
         else:
             # For other strategies (DP, TP), a standard training loop is sufficient
             running_loss = 0.0
