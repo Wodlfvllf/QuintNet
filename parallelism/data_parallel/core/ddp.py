@@ -131,9 +131,9 @@ class DataParallel(nn.Module):
         All arguments are passed directly to the underlying model's forward method.
         """
         rank = dist.get_rank()
-        print(f"[Rank {rank}] DataParallel: START forward", flush=True)
+        # print(f"[Rank {rank}] DataParallel: START forward", flush=True)
         res = self.model(*args, **kwargs)
-        print(f"[Rank {rank}] DataParallel: END forward", flush=True)
+        # print(f"[Rank {rank}] DataParallel: END forward", flush=True)
         return res
     
     def backward(self, *args, **kwargs):
@@ -146,10 +146,10 @@ class DataParallel(nn.Module):
         
         All arguments are passed directly to the underlying model's backward method.
         """
-        rank = dist.get_rank()
-        print(f"[Rank {rank}] DataParallel: START backward", flush=True)
+        # rank = dist.get_rank()
+        # print(f"[Rank {rank}] DataParallel: START backward", flush=True)
         res = self.model.backward(*args, **kwargs)
-        print(f"[Rank {rank}] DataParallel: END backward", flush=True)
+        # print(f"[Rank {rank}] DataParallel: END backward", flush=True)
         return res
     
     def remove_hooks(self) -> None:

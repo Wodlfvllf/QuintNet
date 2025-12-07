@@ -127,6 +127,10 @@ class Trainer:
         # Global Batch Size = Micro Batch Size * Grad Acc Steps * DP Size
         dp_size = self.config['mesh_dim'][self.config['mesh_name'].index('dp')]
         micro_batch_size = self.config['batch_size'] // (self.config['grad_acc_steps'] * dp_size)
+        if micro_batch_size < 1:
+            micro_batch_size = 1
+        # Store for metric calculation later
+        self.config['micro_batch_size'] = micro_batch_size
         
         # Note: This assumes a DDP -> PP wrapping order for the model.
         # QuintNet's DataParallel stores the wrapped model in `self.model`, not `self.module`.
@@ -159,13 +163,43 @@ class Trainer:
             train_loss, train_acc = self._train_epoch(epoch)
             val_loss, val_acc = self._validate_epoch(epoch)
 
+            # For pipeline parallelism, metrics are only calculated on last-stage ranks.
+            # We need to broadcast them to rank 0 for logging.
+            if self.is_pipeline:
+                # Create tensors to hold metrics on all ranks
+                metrics_tensor = torch.zeros(4, device=self.device)
+                
+                # Last-stage ranks populate the tensor with actual metrics
+                if self.pipeline_trainer.is_last_stage:
+                    metrics_tensor[0] = train_loss if train_loss is not None else 0.0
+                    metrics_tensor[1] = train_acc if train_acc is not None else 0.0
+                    metrics_tensor[2] = val_loss if val_loss is not None else 0.0
+                    metrics_tensor[3] = val_acc if val_acc is not None else 0.0
+                
+                # Broadcast from the first last-stage rank (pp_rank = pp_size - 1 on each DP group)
+                # We use global rank 1 (which is last-stage in DP group 0 for typical [dp=2, tp=2, pp=2] mesh)
+                # More robust: use all-reduce so all last-stage ranks contribute
+                dist.all_reduce(metrics_tensor, op=dist.ReduceOp.MAX)
+                
+                train_loss = metrics_tensor[0].item()
+                train_acc = metrics_tensor[1].item()
+                val_loss = metrics_tensor[2].item()
+                val_acc = metrics_tensor[3].item()
+
             # Logging should only happen on the main rank to avoid clutter
             if self.global_rank == 0:
                 print(f"Epoch {epoch+1} Results:")
                 print(f"  Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.2f}%")
                 print(f"  Val Loss:   {val_loss:.4f} | Val Acc:   {val_acc:.2f}%")
         
-        print("\nTraining complete.")
+        if self.global_rank == 0:
+            print("\nTraining complete.")
+            
+            # Save model checkpoint for independent verification
+            checkpoint_path = 'model_checkpoint.pt'
+            self._save_checkpoint(checkpoint_path)
+            print(f"✅ Model saved to: {checkpoint_path}")
+            print("   Run verification: python -m QuintNet.examples.verify_model --checkpoint model_checkpoint.pt")
 
     def _train_epoch(self, epoch: int):
         """
@@ -183,16 +217,42 @@ class Trainer:
         self.model.train()
         
         if self.is_pipeline:
-            # For pipeline parallelism, we use the specialized PipelineTrainer's train_step
-            # print(f"[Rank {self.global_rank}] Trainer: Calling pipeline_trainer.train_step", flush=True)
-            res = self.pipeline_trainer.train_step(
-                self.train_loader,
-                self.tensor_shapes,
-                self.device,
-                torch.float32,
-            )
-            # print(f"[Rank {self.global_rank}] Trainer: Finished pipeline_trainer.train_step", flush=True)
-            return res
+            # For pipeline parallelism, we need to loop over the entire dataset
+            # Each train_step processes grad_acc_steps micro-batches
+            total_loss = 0.0
+            total_correct = 0
+            total_samples = 0
+            num_successful_steps = 0
+            
+            # Calculate how many optimizer steps we need for one epoch
+            # num_steps = total_batches / grad_acc_steps
+            num_steps = len(self.train_loader.dataloader) // self.config['grad_acc_steps']
+            if num_steps < 1:
+                num_steps = 1
+            
+            for step in range(num_steps):
+                step_loss, step_acc = self.pipeline_trainer.train_step(
+                    self.train_loader,
+                    self.tensor_shapes,
+                    self.device,
+                    torch.float32,
+                )
+                
+                # Accumulate metrics (only last-stage ranks have actual values)
+                if step_loss is not None and step_acc is not None:
+                    # step_loss is already averaged per micro-batch
+                    # step_acc is accuracy % for this step
+                    total_loss += step_loss
+                    total_correct += step_acc  # Already a percentage
+                    num_successful_steps += 1
+            
+            # Return average metrics for the epoch
+            if num_successful_steps > 0:
+                avg_loss = total_loss / num_successful_steps
+                avg_acc = total_correct / num_successful_steps  # Average of accuracy %
+                return avg_loss, avg_acc
+            else:
+                return None, None
         else:
             # For other strategies (DP, TP), a standard training loop is sufficient
             running_loss = 0.0
@@ -280,3 +340,24 @@ class Trainer:
             avg_loss = total_loss / total_samples if total_samples > 0 else 0
             accuracy = 100 * total_correct / total_samples if total_samples > 0 else 0
             return avg_loss, accuracy
+    
+    def _save_checkpoint(self, path: str):
+        """
+        Save model checkpoint for independent verification.
+        Handles various wrapper types (DDP, PP, etc.)
+        """
+        # Get the underlying model state dict, handling wrappers
+        if hasattr(self.model, 'model') and hasattr(self.model.model, 'local_module'):
+            # DDP -> PP case: self.model is DataParallel, self.model.model is PipelineParallelWrapper
+            # For verification, we'd need to gather all stages - for now save what we have
+            state_dict = {'pipeline_stage': self.model.model.local_module.state_dict()}
+        elif hasattr(self.model, 'module'):
+            # Standard DDP wrapper
+            state_dict = self.model.module.state_dict()
+        else:
+            state_dict = self.model.state_dict()
+        
+        torch.save({
+            'model_state_dict': state_dict,
+            'config': self.config,
+        }, path)

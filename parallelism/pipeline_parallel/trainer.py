@@ -78,7 +78,7 @@ class PipelineTrainer:
         self.rank = pp_rank
         self.world_size = dist.get_world_size(group=pp_group)
         
-        print(f"[Rank {pp_rank}] PipelineTrainer initialized with model type: {type(self.model)}", flush=True)
+        # print(f"[Rank {pp_rank}] PipelineTrainer initialized with model type: {type(self.model)}", flush=True)
 
         # Track metrics during training (used by schedule classes)
         self.batch_labels = []
@@ -109,10 +109,10 @@ class PipelineTrainer:
         Returns:
             Tuple of (loss, accuracy) - only on the last rank of the pipeline.
         """
-        rank = dist.get_rank()
-        print(f"[Rank {rank}] PipelineTrainer: START train_step", flush=True)
+        # rank = dist.get_rank()
+        # print(f"[Rank {rank}] PipelineTrainer: START train_step", flush=True)
         res = self.schedule.train_step(data_loader, tensor_shapes, device, dtype)
-        print(f"[Rank {rank}] PipelineTrainer: END train_step", flush=True)
+        # print(f"[Rank {rank}] PipelineTrainer: END train_step", flush=True)
         return res
     
     def evaluate(self, val_loader, tensor_shapes, device, dtype):
@@ -137,17 +137,18 @@ class PipelineTrainer:
         total_samples = 0
         
         with torch.no_grad():
-            rank = dist.get_rank()
-            print(f"[Rank {rank}] PipelineTrainer: START evaluate loop", flush=True)
+            # rank = dist.get_rank()
+            # print(f"[Rank {rank}] PipelineTrainer: START evaluate loop", flush=True)
             for i, batch in enumerate(val_loader):
-                # print(f"[Rank {rank}] PipelineTrainer: Evaluating batch {i}", flush=True)
-                # Receive activation from previous stage
+                # Receive activation from previous stage (None for first stage)
                 input_tensor = pipeline_communicate(
                     operation='recv_forward',
                     pp_group=self.pp_group,
                     pp_rank=self.rank,
                     device=device,
                     dtype=dtype,
+                    is_first_stage=self.is_first_stage,
+                    is_last_stage=self.is_last_stage,
                     shapes=tensor_shapes
                 )
                 
@@ -159,7 +160,7 @@ class PipelineTrainer:
                     # Subsequent stages take activations from previous stage
                     output_tensor = self.model.forward(input_tensor)
                 
-                # Send activation to next stage
+                # Send activation to next stage (no-op for last stage)
                 pipeline_communicate(
                     operation='send_forward',
                     pp_group=self.pp_group,
@@ -167,6 +168,8 @@ class PipelineTrainer:
                     tensor=output_tensor,
                     device=device,
                     dtype=dtype,
+                    is_first_stage=self.is_first_stage,
+                    is_last_stage=self.is_last_stage,
                     shapes=tensor_shapes
                 )
                 

@@ -71,11 +71,11 @@ class ParameterBroadcaster:
             src_global_rank = 0
         
         # Print a message to indicate the start of broadcasting, only on the current rank.
-        print(f"DataParallel Rank {self.config.rank}: Broadcasting parameters from global rank {src_global_rank}", flush=True)
+        # print(f"DataParallel Rank {self.config.rank}: Broadcasting parameters from global rank {src_global_rank}", flush=True)
         
         # Iterate through all parameters of the model and broadcast their data.
         for param in model.parameters():
             self.backend.broadcast_tensor(tensor=param.data, src=src_global_rank, group=self.config.process_group)
 
         # Print a message to indicate completion, only on the current rank.
-        print(f"DataParallel Rank {self.config.rank}: Parameter broadcast complete")
+        # print(f"DataParallel Rank {self.config.rank}: Parameter broadcast complete")

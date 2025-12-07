@@ -87,7 +87,7 @@ def apply_tensor_parallel(model: nn.Module,
                 if method_of_parallelism == "column":
                     # Shard the output features (columns of the weight matrix)
                     if out_f % tp_world_size != 0:
-                        print(f"Warning: {current_path} out_features {out_f} not divisible by tp_size {tp_world_size}. Skipping layer.")
+                        # print(f"Warning: {current_path} out_features {out_f} not divisible by tp_size {tp_world_size}. Skipping layer.")
                         continue  # Skip this layer if not divisible
 
                     cols_per_rank = out_f // tp_world_size
@@ -115,7 +115,7 @@ def apply_tensor_parallel(model: nn.Module,
                 elif method_of_parallelism == "row":
                     # Shard the input features (rows of the weight matrix)
                     if in_f % tp_world_size != 0:
-                        print(f"Warning: {current_path} in_features {in_f} not divisible by tp_size {tp_world_size}. Skipping layer.")
+                        # print(f"Warning: {current_path} in_features {in_f} not divisible by tp_size {tp_world_size}. Skipping layer.")
                         continue  # Skip this layer if not divisible
                         
                     rows_per_rank = in_f // tp_world_size
@@ -164,7 +164,8 @@ def apply_tensor_parallel(model: nn.Module,
     
     # Print a confirmation message on rank 0
     if dist.get_rank() == 0:
-        print(f"Applied tensor parallelism with tp_size={tp_size}")
-        print(f"Gradient sync: {'enabled' if sync_gradients else 'disabled'}")
+        # print(f"Applied tensor parallelism with tp_size={tp_size}")
+        # print(f"Gradient sync: {'enabled' if sync_gradients else 'disabled'}")
+        pass
     
     return model

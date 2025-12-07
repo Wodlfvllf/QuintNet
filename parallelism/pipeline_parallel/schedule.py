@@ -257,24 +257,24 @@ class OneFOneBSchedule(PipelineSchedule):
         
         def _forward_step(input_tensor):
             """Helper function for performing a micro-batch forward pass."""
-            rank = dist.get_rank()
+            # rank = dist.get_rank()
             # print(f"[Rank {rank}] _forward_step: Getting batch", flush=True)
             batch = next(data_loader)
             # print(f"[Rank {rank}] _forward_step: Got batch", flush=True)
             
             if trainer.is_first_stage:
-                print(f"[Rank {rank}] _forward_step: Calling model.forward (Stage 0). Model type: {type(trainer.model)}", flush=True)
+                # print(f"[Rank {rank}] _forward_step: Calling model.forward (Stage 0). Model type: {type(trainer.model)}", flush=True)
                 
-                print(f"[Rank {rank}] _forward_step: Moving input to device {device} (Current CUDA device: {torch.cuda.current_device()})...", flush=True)
+                # print(f"[Rank {rank}] _forward_step: Moving input to device {device} (Current CUDA device: {torch.cuda.current_device()})...", flush=True)
                 input_tensor = batch["images"].to(device)
-                print(f"[Rank {rank}] _forward_step: Input moved. Calling forward...", flush=True)
+                # print(f"[Rank {rank}] _forward_step: Input moved. Calling forward...", flush=True)
                 
                 output_tensor = trainer.model.forward(input_tensor)
-                print(f"[Rank {rank}] _forward_step: Finished model.forward (Stage 0)", flush=True)
+                # print(f"[Rank {rank}] _forward_step: Finished model.forward (Stage 0)", flush=True)
             else:
-                print(f"[Rank {rank}] _forward_step: Calling model.forward (Stage > 0)", flush=True)
+                # print(f"[Rank {rank}] _forward_step: Calling model.forward (Stage > 0)", flush=True)
                 output_tensor = trainer.model.forward(input_tensor)
-                print(f"[Rank {rank}] _forward_step: Finished model.forward (Stage > 0)", flush=True)
+                # print(f"[Rank {rank}] _forward_step: Finished model.forward (Stage > 0)", flush=True)
             
             # On the last stage, calculate loss and track accuracy
             if trainer.is_last_stage:
@@ -286,8 +286,13 @@ class OneFOneBSchedule(PipelineSchedule):
                 logging_loss += loss.item()
                 
                 _, predicted = torch.max(output_tensor, 1)
-                total_correct += (predicted == labels).sum().item()
-                total_samples += labels.size(0)
+                batch_correct = (predicted == labels).sum().item()
+                batch_total = labels.size(0)
+                total_correct += batch_correct
+                total_samples += batch_total
+                
+                # Debug: Print raw numbers so user can verify manually
+                # Uncomment to see: print(f"Batch: {batch_correct}/{batch_total} correct")
                 
                 output_tensor = loss # The loss scalar is used as input gradient for the backward pass
             
@@ -296,9 +301,9 @@ class OneFOneBSchedule(PipelineSchedule):
         # ===== WARMUP PHASE =====
         # Only forward passes are executed to fill the pipeline.
         rank = dist.get_rank()
-        print(f"[Rank {rank}] 1F1B: START Warmup Phase ({num_warmup_microbatches} steps)", flush=True)
+        # print(f"[Rank {rank}] 1F1B: START Warmup Phase ({num_warmup_microbatches} steps)", flush=True)
         for i in range(num_warmup_microbatches):
-            print(f"[Rank {rank}] 1F1B: Warmup step {i}", flush=True)
+            # print(f"[Rank {rank}] 1F1B: Warmup step {i}", flush=True)
             input_tensor = pipeline_communicate(
                 operation='recv_forward',
                 pp_group=trainer.pp_group,
@@ -323,12 +328,12 @@ class OneFOneBSchedule(PipelineSchedule):
             )
             input_tensors.append(input_tensor)
             output_tensors.append(output_tensor)
-        print(f"[Rank {rank}] 1F1B: END Warmup Phase", flush=True)
+        # print(f"[Rank {rank}] 1F1B: END Warmup Phase", flush=True)
         
         # ===== STEADY STATE (1F1B) =====
         # Forward and backward passes happen concurrently.
         # This phase starts by receiving a forward activation from the previous stage (if any).
-        print(f"[Rank {rank}] 1F1B: START Steady State ({num_microbatches_remaining} steps)", flush=True)
+        # print(f"[Rank {rank}] 1F1B: START Steady State ({num_microbatches_remaining} steps)", flush=True)
         if num_microbatches_remaining > 0:
             input_tensor = pipeline_communicate(
                 operation='recv_forward',
@@ -342,7 +347,7 @@ class OneFOneBSchedule(PipelineSchedule):
             )
         
         for microbatch_idx in range(num_microbatches_remaining):
-            print(f"[Rank {rank}] 1F1B: Steady State step {microbatch_idx}", flush=True)
+            # print(f"[Rank {rank}] 1F1B: Steady State step {microbatch_idx}", flush=True)
             is_last_iteration = (microbatch_idx == num_microbatches_remaining - 1)
             
             # Forward pass for current micro-batch
@@ -404,13 +409,13 @@ class OneFOneBSchedule(PipelineSchedule):
                     is_first_stage=trainer.is_first_stage,
                     is_last_stage=trainer.is_last_stage,
                 )
-        print(f"[Rank {rank}] 1F1B: END Steady State", flush=True)
+        # print(f"[Rank {rank}] 1F1B: END Steady State", flush=True)
         
         # ===== COOLDOWN PHASE =====
         # Only backward passes are executed to clear the pipeline.
-        print(f"[Rank {rank}] 1F1B: START Cooldown Phase", flush=True)
+        # print(f"[Rank {rank}] 1F1B: START Cooldown Phase", flush=True)
         for warmup_idx in range(num_warmup_microbatches):
-            print(f"[Rank {rank}] 1F1B: Cooldown step {warmup_idx}", flush=True)
+            # print(f"[Rank {rank}] 1F1B: Cooldown step {warmup_idx}", flush=True)
             # Retrieve remaining stored inputs and outputs
             input_tensor = input_tensors.pop(0)
             output_tensor = output_tensors.pop(0)
@@ -445,7 +450,7 @@ class OneFOneBSchedule(PipelineSchedule):
                 is_last_stage=trainer.is_last_stage,
                 shapes=tensor_shapes    
             )
-        print(f"[Rank {rank}] 1F1B: END Cooldown Phase", flush=True)
+        # print(f"[Rank {rank}] 1F1B: END Cooldown Phase", flush=True)
         
         # Perform optimizer step after all gradients have been accumulated
         if trainer.optimizer is not None:

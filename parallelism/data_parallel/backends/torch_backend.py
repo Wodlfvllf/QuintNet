@@ -56,10 +56,10 @@ class TorchDistributedBackend(DistributedBackend):
             group (Optional[dist.ProcessGroup]): The process group.
         """
         if self.is_initialized():
-            rank = dist.get_rank()
-            print(f"[Rank {rank}] TorchDistributedBackend: START broadcast from {src}", flush=True)
+            # rank = dist.get_rank()
+            # print(f"[Rank {rank}] TorchDistributedBackend: START broadcast from {src}", flush=True)
             dist.broadcast(tensor, src=src, group=group)
-            print(f"[Rank {rank}] TorchDistributedBackend: END broadcast", flush=True)
+            # print(f"[Rank {rank}] TorchDistributedBackend: END broadcast", flush=True)
     
     def all_reduce_tensor(self, tensor: torch.Tensor, op: dist.ReduceOp, group: Optional[dist.ProcessGroup] = None) -> None:
         """
@@ -71,10 +71,10 @@ class TorchDistributedBackend(DistributedBackend):
             group (Optional[dist.ProcessGroup]): The process group.
         """
         if self.is_initialized():
-            rank = dist.get_rank()
-            print(f"[Rank {rank}] TorchDistributedBackend: START all_reduce", flush=True)
+            # rank = dist.get_rank()
+            # print(f"[Rank {rank}] TorchDistributedBackend: START all_reduce", flush=True)
             dist.all_reduce(tensor, op=op, group=group)
-            print(f"[Rank {rank}] TorchDistributedBackend: END all_reduce", flush=True)
+            # print(f"[Rank {rank}] TorchDistributedBackend: END all_reduce", flush=True)
     
     def get_world_size(self, group: Optional[dist.ProcessGroup] = None) -> int:
         """
