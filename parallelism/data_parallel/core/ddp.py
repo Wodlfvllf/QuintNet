@@ -44,6 +44,7 @@ from ..components.bucket_manager import BucketManager
 from ..components.gradient_reducer import GradientReducer
 from ..components.parameter_broadcaster import ParameterBroadcaster
 from .config import DistributedConfig, BucketConfig, ReductionStrategy
+import torch.distributed as dist
 
 class DataParallel(nn.Module):
     """
@@ -133,6 +134,22 @@ class DataParallel(nn.Module):
         print(f"[Rank {rank}] DataParallel: START forward", flush=True)
         res = self.model(*args, **kwargs)
         print(f"[Rank {rank}] DataParallel: END forward", flush=True)
+        return res
+    
+    def backward(self, *args, **kwargs):
+        """
+        Performs the backward pass through the wrapped model.
+
+        This method delegates to the wrapped model's backward method, which is
+        required for pipeline parallelism where the PipelineParallelWrapper
+        has a custom backward() method for handling pipeline communication.
+        
+        All arguments are passed directly to the underlying model's backward method.
+        """
+        rank = dist.get_rank()
+        print(f"[Rank {rank}] DataParallel: START backward", flush=True)
+        res = self.model.backward(*args, **kwargs)
+        print(f"[Rank {rank}] DataParallel: END backward", flush=True)
         return res
     
     def remove_hooks(self) -> None:
