@@ -1,23 +1,26 @@
-# Tensor Parallel (TP) Training Configuration
+# Tensor Parallel Configuration
+# Use: torchrun --nproc_per_node=2 -m QuintNet.examples.simple_tp --config QuintNet/examples/tp_config.yaml
+
+# Training
 dataset_path: /mnt/dataset/mnist/
-batch_size: 64
-num_workers: 4
-num_epochs: 10
+batch_size: 32
+num_workers: 2
+num_epochs: 5
 learning_rate: 1e-4
 grad_acc_steps: 1
+max_grad_norm: 1.0
 patience: 5
 
-# Model Configuration
+# Model
 img_size: 28
 patch_size: 4
-hidden_dim: 64
+hidden_dim: 64           # Must be divisible by tp_size (2)
 in_channels: 1
-n_heads: 4
-depth: 4
+n_heads: 4               # Must be divisible by tp_size (2)
+depth: 8
 
-# Parallelism Configuration
+# Parallelism - Pure Tensor Parallel
 device_type: cuda
-mesh_dim: [1, 4, 1]  # 4 GPUs for Tensor Parallelism
-mesh_name: ['dp', 'tp', 'pp']
+mesh_dim: [2]            # 2 GPUs for TP
+mesh_name: ['tp']        # Only tensor parallelism
 strategy_name: 'tp'
-schedule: '1f1b' # Not used in TP, but kept for consistency
