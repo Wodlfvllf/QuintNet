@@ -58,8 +58,17 @@ def main():
     val_dataset = CustomDataset(config['dataset_path'], split='test', transform=mnist_transform)
     train_sampler = DistributedSampler(train_dataset, num_replicas=dp_size, rank=dp_rank, shuffle=True, seed=42)
     val_sampler = DistributedSampler(val_dataset, num_replicas=dp_size, rank=dp_rank, shuffle=False, seed=42)
-    train_loader = DataLoader(train_dataset, batch_size=config['batch_size'], sampler=train_sampler, num_workers=config['num_workers'], drop_last=True, pin_memory=True)
-    val_loader = DataLoader(val_dataset, batch_size=config['batch_size'], sampler=val_sampler, num_workers=config['num_workers'], drop_last=False, pin_memory=True)
+    
+    # CRITICAL: For pipeline parallelism with gradient accumulation, the DataLoader
+    # must return micro-batches, not the full batch. The formula is:
+    # micro_batch_size = global_batch_size / (grad_acc_steps * dp_size)
+    micro_batch_size = config['batch_size'] // (config['grad_acc_steps'] * dp_size)
+    if micro_batch_size < 1:
+        micro_batch_size = 1
+    print(f"[Rank {global_rank}] Using micro_batch_size={micro_batch_size} (batch_size={config['batch_size']}, grad_acc_steps={config['grad_acc_steps']}, dp_size={dp_size})")
+    
+    train_loader = DataLoader(train_dataset, batch_size=micro_batch_size, sampler=train_sampler, num_workers=config['num_workers'], drop_last=True, pin_memory=True)
+    val_loader = DataLoader(val_dataset, batch_size=micro_batch_size, sampler=val_sampler, num_workers=config['num_workers'], drop_last=False, pin_memory=True)
 
     # Create the base model
     model = Model(
