@@ -11,6 +11,7 @@ from ..core import ProcessGroupManager
 from ..parallelism import TensorParallel
 from ..parallelism import PipelineParallelWrapper
 from ..parallelism import DataParallel
+from ..parallelism.data_parallel.core.config import DistributedConfig
 
 class Hybrid3DCoordinator(BaseCoordinator):
     """
@@ -63,6 +64,7 @@ class Hybrid3DCoordinator(BaseCoordinator):
         self.model.to(device)
 
         # --- 1. Apply Tensor Parallelism ---
+        print(f"[Rank {global_rank}] Hybrid3DCoordinator: Applying Tensor Parallelism...", flush=True)
         tp_model = TensorParallel(
             self.model,
             self.config['mesh_dim'][self.config['mesh_name'].index('tp')],
@@ -73,8 +75,10 @@ class Hybrid3DCoordinator(BaseCoordinator):
             sync_gradients=True,
             method_of_parallelism="column"
         )
+        print(f"[Rank {global_rank}] Hybrid3DCoordinator: Tensor Parallelism applied.", flush=True)
 
         # --- 2. Apply Pipeline Parallelism ---
+        print(f"[Rank {global_rank}] Hybrid3DCoordinator: Applying Pipeline Parallelism...", flush=True)
         pp_model = PipelineParallelWrapper(
             tp_model, 
             self.pg_manager.device_mesh,
@@ -83,9 +87,24 @@ class Hybrid3DCoordinator(BaseCoordinator):
             self.config['mesh_dim'][self.config['mesh_name'].index('pp')],
             device
         ).to(device)
+        print(f"[Rank {global_rank}] Hybrid3DCoordinator: Pipeline Parallelism applied.", flush=True)
 
         # --- 3. Apply Data Parallelism ---
-        dp_model = DataParallel(pp_model)
+        # CRITICAL: Pass the DP-specific process group to avoid deadlocks!
+        # Without this, DataParallel uses the global process group (all 8 ranks),
+        # but Stage 1 ranks are blocked waiting for pipeline communication.
+        dp_group = self.pg_manager.get_group('dp')
+        dp_rank = coords[self.config['mesh_name'].index('dp')]
+        dp_size = self.config['mesh_dim'][self.config['mesh_name'].index('dp')]
+        
+        dp_config = DistributedConfig(
+            rank=dp_rank,
+            world_size=dp_size,
+            process_group=dp_group
+        )
+        
+        print(f"[Rank {global_rank}] Hybrid3DCoordinator: Applying Data Parallelism (dp_rank={dp_rank}, dp_size={dp_size})...", flush=True)
+        dp_model = DataParallel(pp_model, distributed_config=dp_config)
         print(f"[Rank {global_rank}] Hybrid3DCoordinator: Created dp_model of type {type(dp_model)}", flush=True)
 
         return dp_model
