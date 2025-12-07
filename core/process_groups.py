@@ -111,7 +111,10 @@ class ProcessGroupManager:
         Returns:
             dist.ProcessGroup: The communication group for that dimension.
         """
-        return self.device_mesh.get_group(dim_name)
+        group = self.device_mesh.get_group(dim_name)
+        # rank = dist.get_rank()
+        # print(f"[Rank {rank}] ProcessGroupManager: Retrieved group '{dim_name}'", flush=True)
+        return group
 
     def get_all_groups(self) -> Dict[str, dist.ProcessGroup]:
         """
