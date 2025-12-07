@@ -8,6 +8,7 @@ from .main_coordinator import BaseCoordinator
 from ..core import ProcessGroupManager
 from ..parallelism import PipelineParallelWrapper
 from ..parallelism import DataParallel
+from ..parallelism.data_parallel.core.config import DistributedConfig
 
 class DPPCoordinator(BaseCoordinator):
     """
@@ -62,6 +63,17 @@ class DPPCoordinator(BaseCoordinator):
         )
 
         # --- 2. Apply Data Parallelism ---
-        dp_model = DataParallel(pp_model)
+        # CRITICAL: Pass the DP-specific process group to avoid deadlocks!
+        dp_group = self.pg_manager.get_group('dp')
+        dp_rank = coords[self.config['mesh_name'].index('dp')]
+        dp_size = self.config['mesh_dim'][self.config['mesh_name'].index('dp')]
+        
+        dp_config = DistributedConfig(
+            rank=dp_rank,
+            world_size=dp_size,
+            process_group=dp_group
+        )
+        
+        dp_model = DataParallel(pp_model, distributed_config=dp_config)
         
         return dp_model
