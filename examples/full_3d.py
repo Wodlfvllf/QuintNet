@@ -44,7 +44,7 @@ def main():
     )
     
     # Visualize the mesh configuration
-    pg_manager.print_mesh_info()
+    # pg_manager.print_mesh_info()
 
     # Set seed for reproducibility
     torch.manual_seed(42)

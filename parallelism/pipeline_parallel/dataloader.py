@@ -14,15 +14,11 @@ class PipelineDataLoader:
         return self
     
     def __next__(self):
-        # import torch.distributed as dist
-        # rank = dist.get_rank()
-        # print(f"[Rank {rank}] PipelineDataLoader: Requesting next batch", flush=True)
         try:
             batch = next(self.iterator)
         except StopIteration:
             self.iterator = iter(self.dataloader)
             batch = next(self.iterator)
-        # print(f"[Rank {rank}] PipelineDataLoader: Got batch", flush=True)
         
         # Convert to expected format
         return {

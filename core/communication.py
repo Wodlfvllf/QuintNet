@@ -281,7 +281,6 @@ def pipeline_communicate(operation: str,
     
     # direction = '→' if is_send else '←'
     # shape_info = list(tensor.shape) if tensor is not None else shapes
-    # print(f"[Rank {rank}] {operation} | {'sending' if is_send else 'receiving'} {operation.split('_')[1]} "
     #       f"{pp_rank} {direction} {peer_group_rank} (global {peer_global_rank}) | "
     #       f"Shape: {shape_info} | STEP:{STEP}", flush=True)
     
@@ -416,13 +415,10 @@ class All_Gather(torch.autograd.Function):
         world_size = dist.get_world_size(group=group)
         gather_list = [torch.empty_like(out) for _ in range(world_size)]
         
-        # rank = dist.get_rank()
-        # print(f"[Rank {rank}] All_Gather: START", flush=True)
 
         # all_gather: collect local tensors from all ranks into `gather_list`
         dist.all_gather(gather_list, out, group=group)
         
-        # print(f"[Rank {rank}] All_Gather: END", flush=True)
 
         # Concatenate the gathered tensors along the last dimension
         concat_output = torch.cat(gather_list, dim=-1).contiguous()
@@ -514,13 +510,10 @@ class All_Reduce(torch.autograd.Function):
         # Ensure tensor is contiguous and on the correct device
         out = x.contiguous()
         
-        # rank = dist.get_rank()
-        # print(f"[Rank {rank}] All_Reduce: START", flush=True)
 
         # all-reduce: sum across TP group
         dist.all_reduce(out, op=dist.ReduceOp.SUM, group=group)
         
-        # print(f"[Rank {rank}] All_Reduce: END", flush=True)
 
         return out
 

@@ -85,7 +85,6 @@ class PipelineParallelWrapper(nn.Module):
 
         # Print a message on the first DP rank of each stage for clarity.
         if self.device_mesh.get_coordinates_tensor_search(dist.get_rank())[0] == 0:
-            # print(f"[Rank {dist.get_rank()}] PP Stage {self.rank}: Holding blocks {self.layer_distribution}")
             pass
     
     def _distribute_layers(self, num_layers: int) -> list:
@@ -193,10 +192,7 @@ class PipelineParallelWrapper(nn.Module):
         Returns:
             torch.Tensor: The output activation tensor to be passed to the next stage.
         """
-        # rank = dist.get_rank()
-        # print(f"[Rank {rank}] PipelineParallelWrapper: START forward", flush=True)
         res = self.local_module(x)
-        # print(f"[Rank {rank}] PipelineParallelWrapper: END forward", flush=True)
         return res
     
     def backward(self, input_tensor: torch.Tensor, output_tensor: torch.Tensor, output_tensor_grad: torch.Tensor) -> torch.Tensor:

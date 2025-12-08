@@ -112,8 +112,6 @@ class ProcessGroupManager:
             dist.ProcessGroup: The communication group for that dimension.
         """
         group = self.device_mesh.get_group(dim_name)
-        # rank = dist.get_rank()
-        # print(f"[Rank {rank}] ProcessGroupManager: Retrieved group '{dim_name}'", flush=True)
         return group
 
     def get_all_groups(self) -> Dict[str, dist.ProcessGroup]:
@@ -144,22 +142,22 @@ class ProcessGroupManager:
         Only prints from global rank 0.
         """
         # Commented out for clean output - uncomment for debugging mesh configuration
-        # if dist.get_rank() == 0:
-        #     print("\n" + "="*60)
-        #     print("Device Mesh Configuration")
-        #     print("="*60)
-        #     print(f"Mesh Dimensions: {self.device_mesh.mesh_dim}")
-        #     print(f"Mesh Names:      {self.device_mesh.mesh_name}")
-        #     print("-" * 60)
-        #     print("Global Rank | Coordinates")
-        #     print("-" * 60)
-        #     
-        #     world_size = dist.get_world_size()
-        #     for rank in range(world_size):
-        #         coords = self.get_coordinates_tensor_search(rank)
-        #         coord_str = ", ".join([f"{name}={val}" for name, val in zip(self.device_mesh.mesh_name, coords)])
-        #         print(f"Rank {rank:3d}    | {coord_str}")
-        #     print("="*60 + "\n")
+        if dist.get_rank() == 0:
+            print("\n" + "="*60)
+            print("Device Mesh Configuration")
+            print("="*60)
+            print(f"Mesh Dimensions: {self.device_mesh.mesh_dim}")
+            print(f"Mesh Names:      {self.device_mesh.mesh_name}")
+            print("-" * 60)
+            print("Global Rank | Coordinates")
+            print("-" * 60)
+            
+            world_size = dist.get_world_size()
+            for rank in range(world_size):
+                coords = self.get_coordinates_tensor_search(rank)
+                coord_str = ", ".join([f"{name}={val}" for name, val in zip(self.device_mesh.mesh_name, coords)])
+                print(f"Rank {rank:3d}    | {coord_str}")
+            print("="*60 + "\n")
         pass
 
 def init_process_groups(

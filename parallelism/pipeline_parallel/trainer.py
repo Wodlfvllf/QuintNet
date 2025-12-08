@@ -78,7 +78,6 @@ class PipelineTrainer:
         self.rank = pp_rank
         self.world_size = dist.get_world_size(group=pp_group)
         
-        # print(f"[Rank {pp_rank}] PipelineTrainer initialized with model type: {type(self.model)}", flush=True)
 
         # Track metrics during training (used by schedule classes)
         self.batch_labels = []
@@ -109,10 +108,7 @@ class PipelineTrainer:
         Returns:
             Tuple of (loss, accuracy) - only on the last rank of the pipeline.
         """
-        # rank = dist.get_rank()
-        # print(f"[Rank {rank}] PipelineTrainer: START train_step", flush=True)
         res = self.schedule.train_step(data_loader, tensor_shapes, device, dtype)
-        # print(f"[Rank {rank}] PipelineTrainer: END train_step", flush=True)
         return res
     
     def evaluate(self, val_loader, tensor_shapes, device, dtype):
@@ -137,8 +133,6 @@ class PipelineTrainer:
         total_samples = 0
         
         with torch.no_grad():
-            # rank = dist.get_rank()
-            # print(f"[Rank {rank}] PipelineTrainer: START evaluate loop", flush=True)
             for i, batch in enumerate(val_loader):
                 # Receive activation from previous stage (None for first stage)
                 input_tensor = pipeline_communicate(

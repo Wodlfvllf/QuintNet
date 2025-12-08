@@ -128,10 +128,15 @@ QuintNet/
 │
 ├── trainer.py                 # Main Trainer class
 │
+├── docs/
+│   └── TRAINING_GUIDE.md      # 📖 Complete training workflow guide
+│
 └── examples/
     ├── full_3d.py             # Complete 3D training example
-    ├── config.yaml            # Training configuration
-    └── baseline_single_gpu.py # Baseline for verification
+    ├── simple_dp.py           # Data Parallel example
+    ├── simple_pp.py           # Pipeline Parallel example
+    ├── simple_tp.py           # Tensor Parallel example
+    └── config.yaml            # Training configuration
 ```
 
 ## ⚙️ Configuration
@@ -197,10 +202,24 @@ Training a Vision Transformer on MNIST with 8 GPUs (2×2×2 mesh):
 
 | Epoch | Train Loss | Train Acc | Val Loss | Val Acc |
 |-------|------------|-----------|----------|---------|
-| 1 | 1.38 | 50.4% | 0.89 | 69.6% |
-| 2 | 0.67 | 77.7% | 0.51 | 84.7% |
-| 3 | 0.42 | 86.3% | 0.34 | 89.3% |
-| 4 | 0.32 | 90.1% | 0.28 | 91.2% |
+| 1 | 1.3817 | 50.46% | 0.8921 | 69.30% |
+| 2 | 0.6662 | 77.72% | 0.5135 | 84.52% |
+| 3 | 0.4219 | 86.33% | 0.3477 | 89.24% |
+| 4 | 0.3214 | 90.02% | 0.2883 | 91.16% |
+| 5 | 0.2728 | 91.86% | 0.2509 | 92.06% |
+| 6 | 0.2477 | 92.96% | 0.2510 | 92.50% |
+| 7 | 0.2364 | 93.78% | 0.2464 | 92.76% |
+| 8 | 0.2355 | 94.36% | 0.2372 | 93.18% |
+| 9 | 0.2450 | 94.46% | 0.2726 | 93.16% |
+| 10 | 0.2573 | 94.80% | 0.3190 | **93.24%** |
+
+**Final Accuracy: 93.24% | Training Time: 1120.72 seconds (~18.7 minutes)**
+
+### Training Configuration
+- **Model**: Vision Transformer (64 hidden dim, 8 blocks, 4 heads)
+- **Dataset**: MNIST (60,000 train, 10,000 test)
+- **Batch Size**: 32 (effective: 32 × 2 DP = 64)
+- **Parallelism**: 2 Data × 2 Tensor × 2 Pipeline
 
 ## 🧪 Testing
 
@@ -230,11 +249,19 @@ class MyStrategy(BaseParallelismStrategy):
 
 ## 📚 Documentation
 
-Each module contains detailed docstrings explaining the concepts. Key files to read:
+**📖 [Complete Training Guide](docs/TRAINING_GUIDE.md)** - Detailed walkthrough with diagrams explaining:
+- Device Mesh and Process Groups
+- Model Wrapping Pipeline (TP → PP → DP)
+- Data Flow Architecture
+- 1F1B Pipeline Schedule
+- Gradient Synchronization
 
-- `parallelism/pipeline_parallel/schedule.py` - 1F1B schedule explanation
+### Key Source Files:
+
+- `parallelism/pipeline_parallel/schedule.py` - 1F1B schedule implementation
 - `core/communication.py` - Distributed primitives with autograd support
 - `parallelism/data_parallel/core/ddp.py` - DDP implementation details
+- `parallelism/tensor_parallel/layers.py` - Column/Row parallel layers
 
 
 ---
