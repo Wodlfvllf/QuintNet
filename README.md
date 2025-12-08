@@ -265,6 +265,7 @@ class MyStrategy(BaseParallelismStrategy):
 
 
 ---
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 <p align="center">
   <strong>Built for learning and scaling deep learning 🧠</strong>
