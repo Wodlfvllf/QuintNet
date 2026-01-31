@@ -300,8 +300,9 @@ def load_gpt2_distributed(checkpoint_path, pg_manager, config, device, model_con
             col_start = tp_rank * cols_per_rank
             col_end = col_start + cols_per_rank
             
-            # The magic: read ONLY the slice we need!
-            state_dict[f"{prefix}.attn.c_attn.weight"] = c_attn_w_full[:, col_start:col_end]
+            # Slice columns, then transpose: Conv1D [768,2304] → [768,1152] → [1152,768]
+            c_attn_slice = c_attn_w_full[:, col_start:col_end]
+            state_dict[f"{prefix}.attn.c_attn.weight"] = torch.tensor(c_attn_slice).t().contiguous()
             state_dict[f"{prefix}.attn.c_attn.bias"] = c_attn_b_full[col_start:col_end]
 
 
@@ -315,7 +316,9 @@ def load_gpt2_distributed(checkpoint_path, pg_manager, config, device, model_con
             row_start = tp_rank * rows_per_rank
             row_end = row_start + rows_per_rank
             
-            state_dict[f"{prefix}.attn.c_proj.weight"] = c_proj_w_full[row_start:row_end, :]
+            # Slice rows, then transpose: Conv1D [768,768] → [384,768] → [768,384]
+            c_proj_slice = c_proj_w_full[row_start:row_end, :]
+            state_dict[f"{prefix}.attn.c_proj.weight"] = torch.tensor(c_proj_slice).t().contiguous()
             
             # Bias: only tp_rank=0 stores it (to avoid double-add after AllReduce)
             if tp_rank == 0:
@@ -332,7 +335,9 @@ def load_gpt2_distributed(checkpoint_path, pg_manager, config, device, model_con
             col_start = tp_rank * cols_per_rank
             col_end = col_start + cols_per_rank
             
-            state_dict[f"{prefix}.mlp.c_fc.weight"] = c_fc_w_full[:, col_start:col_end]
+            # Slice columns, then transpose: Conv1D [768,3072] → [768,1536] → [1536,768]
+            c_fc_slice = c_fc_w_full[:, col_start:col_end]
+            state_dict[f"{prefix}.mlp.c_fc.weight"] = torch.tensor(c_fc_slice).t().contiguous()
             state_dict[f"{prefix}.mlp.c_fc.bias"] = c_fc_b_full[col_start:col_end]
 
             # ─────────────────────────────────────────────────────────
@@ -345,7 +350,9 @@ def load_gpt2_distributed(checkpoint_path, pg_manager, config, device, model_con
             row_start = tp_rank * rows_per_rank
             row_end = row_start + rows_per_rank
             
-            state_dict[f"{prefix}.mlp.c_proj.weight"] = c_proj_w_full[row_start:row_end, :]
+            # Slice rows, then transpose: Conv1D [3072,768] → [1536,768] → [768,1536]
+            mlp_c_proj_slice = c_proj_w_full[row_start:row_end, :]
+            state_dict[f"{prefix}.mlp.c_proj.weight"] = torch.tensor(mlp_c_proj_slice).t().contiguous()
             
             if tp_rank == 0:
                 state_dict[f"{prefix}.mlp.c_proj.bias"] = f.get_tensor(f"{prefix}.mlp.c_proj.bias")
