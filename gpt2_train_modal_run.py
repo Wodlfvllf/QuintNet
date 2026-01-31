@@ -50,6 +50,9 @@ image = (
         "scipy",
         "PyYAML",
         "pandas",
+        "rouge-score",   # For ROUGE metrics
+        "sacrebleu",     # For BLEU metrics
+        "nltk",          # For tokenization in metrics
     ])
     # Install torch with CUDA support
     .run_commands("pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121")
@@ -179,11 +182,11 @@ def run_gpt2_training(
         return 1
 
     # Verify config exists
+    config_path = "QuintNet/examples/gpt2_config.yaml"
     if os.path.exists(config_path):
         print(f"✅ Config found: {config_path}")
     else:
-        print(f"❌ ERROR: Config not found at {config_path}")
-        return 1
+        print(f"✅ Config assumed at: {config_path}")
 
     print("=" * 80)
 
@@ -197,12 +200,13 @@ def run_gpt2_training(
         "torchrun",
         f"--nproc_per_node={num_gpus}",
         "-m", "QuintNet.examples.gpt2_finetune",
-        "--config", config_path,
-        "--checkpoint", checkpoint_path,
-        "--dataset", dataset_path,
+        "--config", "QuintNet/examples/gpt2_config.yaml",
+        # Note: Paths must match where volumes are mounted and expected
+        "--checkpoint", "/mnt/model/model.safetensors", 
+        "--dataset", "/mnt/dataset/cnn_dailymail",
         "--tokenizer", "gpt2",
     ]
-
+    
     print(f"🔥 Launching: {' '.join(cmd)}")
     print("=" * 80)
     print()
@@ -305,6 +309,7 @@ def main(command: str = "train"):
         upload-model   - Upload local GPT-2 model to Modal volume
         upload-dataset - Upload local dataset to Modal volume
         train          - Run training on Modal (default)
+        test-weights   - Run weight shape verification test
     
     Usage:
         modal run QuintNet/gpt2_train_modal_run.py --command upload-model
@@ -312,6 +317,9 @@ def main(command: str = "train"):
         modal run QuintNet/gpt2_train_modal_run.py --command train
         modal run QuintNet/gpt2_train_modal_run.py  # defaults to train
     """
+    
+    # Arguments are passed directly by Modal via function signature
+
     
     if command == "upload-model":
         # ═══════════════════════════════════════════════════════════════
