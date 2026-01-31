@@ -181,7 +181,7 @@ def main():
     
     val_loader = DataLoader(
         val_dataset,
-        batch_size=128,  # Large batch for fast validation (no gradients)
+        batch_size=128,  # Larger validation batch (500/2 DP = 250 per rank, enough for ~1 batch)
         sampler=val_sampler,
         collate_fn=collator,
         num_workers=config.get('num_workers', 0),
