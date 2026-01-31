@@ -408,7 +408,7 @@ class GPT2Trainer:
             return loss_tensor[0].item(), loss_tensor[1].item()
         
         with torch.no_grad():
-            pbar = tqdm(self.val_loader, desc=f"Validating Epoch {epoch+1}", disable=(self.global_rank != 0))
+            pbar = tqdm(self.val_loader, desc=f"Validating Epoch {epoch+1}", disable=(self.global_rank != 0), ncols=100)
             
             for batch in pbar:
                 input_ids = batch['input_ids'].to(self.device, non_blocking=True)
@@ -427,6 +427,12 @@ class GPT2Trainer:
                 num_tokens = (labels != -100).sum().item()
                 total_loss += loss.item() * num_tokens
                 total_tokens += num_tokens
+                
+                # Show running metrics
+                if self.global_rank == 0 and total_tokens > 0:
+                    curr_loss = total_loss / total_tokens
+                    curr_ppl = math.exp(curr_loss) if curr_loss < 20 else float('inf')
+                    pbar.set_postfix({'loss': f'{curr_loss:.3f}', 'ppl': f'{curr_ppl:.1f}'})
         
         # Aggregate across ranks
         if dist.is_initialized() and dist.get_world_size() > 1:
