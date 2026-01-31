@@ -158,12 +158,10 @@ class Hybrid3DCoordinator(BaseCoordinator):
         # ─────────────────────────────────────────────────────────────────
         dp_group = self.pg_manager.get_group('dp')
         dp_config = DistributedConfig(
-            backend=self.config.get('backend', 'nccl'),
+            rank=self.pg_manager.get_rank('dp'),
+            world_size=self.pg_manager.get_world_size('dp'),
             process_group=dp_group,
-            use_ddp=True,
-            find_unused_parameters=False,
-            gradient_as_bucket_view=True,
-            static_graph=True,
+            broadcast_buffers=True,
         )
         
         dp_model = DataParallel(pp_model, dp_config)
