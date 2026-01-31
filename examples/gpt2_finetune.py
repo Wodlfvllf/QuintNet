@@ -181,7 +181,7 @@ def main():
     
     val_loader = DataLoader(
         val_dataset,
-        batch_size=micro_batch_size,
+        batch_size=64,  # Larger batch for validation (no gradients)
         sampler=val_sampler,
         collate_fn=collator,
         num_workers=config.get('num_workers', 0),
