@@ -226,6 +226,10 @@ class GPT2Trainer:
         if self.global_rank == 0:
             print("\nTraining complete.")
             self._save_checkpoint('final_model.pt')
+            
+            # Run generation-based evaluation (ROUGE/BLEU)
+            if self.config.get('compute_generation_metrics', True):
+                self._evaluate_generation_metrics()
     
     def _train_epoch(self, epoch: int):
         """Train for one epoch."""
@@ -341,8 +345,37 @@ class GPT2Trainer:
         total_tokens = 0
         
         if self.is_pipeline:
-            # TODO: Implement pipeline validation for GPT-2
-            return 0.0, 0.0
+            # Use pipeline evaluator
+            from .parallelism import PipelineDataLoader
+            
+            # Wrap validation loader if not already wrapped
+            val_loader = self.val_loader
+            if not isinstance(val_loader, PipelineDataLoader):
+                val_loader = PipelineDataLoader(val_loader, grad_acc_steps=1, task_type='clm')
+            
+            # Run pipeline evaluation
+            val_loss, val_ppl = self.pipeline_trainer.evaluate(
+                val_loader,
+                self.tensor_shapes,
+                self.device,
+                torch.float32,
+            )
+            
+            # Broadcast result from last stage to all ranks for consistent reporting
+            if val_loss is None:
+                val_loss = 0.0
+                val_ppl = 0.0
+            
+            # Broadcast from last stage
+            loss_tensor = torch.tensor([val_loss, val_ppl], device=self.device)
+            if dist.is_initialized():
+                # Get last stage rank in pipeline group
+                pp_group = self.pg_manager.get_group('pp')
+                pp_size = dist.get_world_size(pp_group)
+                last_stage_rank = pp_size - 1
+                dist.broadcast(loss_tensor, src=last_stage_rank, group=pp_group)
+            
+            return loss_tensor[0].item(), loss_tensor[1].item()
         
         with torch.no_grad():
             pbar = tqdm(self.val_loader, desc=f"Validating Epoch {epoch+1}", disable=(self.global_rank != 0))
@@ -393,3 +426,51 @@ class GPT2Trainer:
             'optimizer_state_dict': self.optimizer.state_dict(),
             'config': self.config,
         }, path)
+    
+    def _evaluate_generation_metrics(self):
+        """
+        Evaluate model using generation-based metrics (ROUGE, BLEU).
+        Only runs on rank 0 and requires non-pipeline mode for generation.
+        """
+        print("\n" + "=" * 60)
+        print("📊 COMPUTING GENERATION METRICS (ROUGE/BLEU)")
+        print("=" * 60)
+        
+        if self.is_pipeline:
+            # For pipeline mode, generation is complex - skip for now
+            print("⚠️  Generation metrics skipped in pipeline mode.")
+            print("    (Generation requires autoregressive decoding across stages)")
+            return
+        
+        try:
+            from .utils.metrics import evaluate_generation
+            
+            # Get underlying model for generation
+            if hasattr(self.model, 'module'):
+                gen_model = self.model.module
+            else:
+                gen_model = self.model
+            
+            # Run generation evaluation on a subset
+            num_eval_samples = self.config.get('num_eval_samples', 50)
+            
+            metrics = evaluate_generation(
+                model=gen_model,
+                tokenizer=self.tokenizer,
+                val_dataset=self.val_loader.dataset,
+                device=self.device,
+                num_samples=num_eval_samples,
+                max_new_tokens=self.config.get('max_target_length', 128),
+            )
+            
+            print("\n📈 Generation Metrics:")
+            print(f"   ROUGE-1: {metrics['rouge1']:.2f}")
+            print(f"   ROUGE-2: {metrics['rouge2']:.2f}")
+            print(f"   ROUGE-L: {metrics['rougeL']:.2f}")
+            print(f"   BLEU:    {metrics['bleu']:.2f}")
+            print("=" * 60)
+            
+        except Exception as e:
+            print(f"⚠️  Error computing generation metrics: {e}")
+            import traceback
+            traceback.print_exc()
