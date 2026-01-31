@@ -23,9 +23,10 @@ from pathlib import Path
 # Define the Modal app for GPT-2 training
 app = modal.App("quintnet-gpt2-training")
 
-# Persistent volumes for model and dataset
+# Persistent volumes for model, dataset, and checkpoints
 model_volume = modal.Volume.from_name("gpt2-model-volume", create_if_missing=True)
 dataset_volume = modal.Volume.from_name("cnn-dailymail-volume", create_if_missing=True)
+checkpoint_volume = modal.Volume.from_name("gpt2-checkpoints-volume", create_if_missing=True)
 
 # ═══════════════════════════════════════════════════════════════════════════
 # LOCAL PATHS (Update these to match your system)
@@ -125,6 +126,78 @@ def upload_dataset():
     print("✅ Dataset upload complete!")
 
 
+@app.function(
+    volumes={"/mnt/checkpoints": checkpoint_volume},
+)
+def list_checkpoints():
+    """
+    List all checkpoint files in the Modal volume.
+    Usage: modal run QuintNet/gpt2_train_modal_run.py::list_checkpoints
+    """
+    import os
+    
+    checkpoint_dir = "/mnt/checkpoints"
+    if not os.path.exists(checkpoint_dir):
+        print("❌ No checkpoints found. Run training first.")
+        return []
+    
+    files = os.listdir(checkpoint_dir)
+    pt_files = [f for f in files if f.endswith('.pt')]
+    
+    print("📂 Checkpoints in Modal volume:")
+    for f in pt_files:
+        path = os.path.join(checkpoint_dir, f)
+        size_mb = os.path.getsize(path) / 1e6
+        print(f"   - {f} ({size_mb:.1f} MB)")
+    
+    return pt_files
+
+
+@app.local_entrypoint()
+def download_checkpoints(output_dir: str = "./checkpoints"):
+    """
+    Download all checkpoint shards from Modal to local for merging.
+    Usage: modal run QuintNet/gpt2_train_modal_run.py --command download --output-dir ./checkpoints
+    """
+    import os
+    
+    # Create output directory
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # List available checkpoints
+    files = list_checkpoints.remote()
+    
+    if not files:
+        print("❌ No checkpoints to download")
+        return
+    
+    print(f"\n📥 Downloading {len(files)} checkpoint files to {output_dir}...")
+    
+    # Download each file
+    for filename in files:
+        remote_path = f"/mnt/checkpoints/{filename}"
+        local_path = os.path.join(output_dir, filename)
+        
+        # Read from volume and write locally
+        data = _read_checkpoint.remote(remote_path)
+        with open(local_path, 'wb') as f:
+            f.write(data)
+        
+        print(f"   ✓ Downloaded: {filename}")
+    
+    print(f"\n✅ All checkpoints downloaded to: {output_dir}")
+    print(f"\n🔧 To merge, run:")
+    print(f"   python merge_checkpoints.py --input_dir {output_dir} --output merged_model.pt")
+
+
+@app.function(
+    volumes={"/mnt/checkpoints": checkpoint_volume},
+)
+def _read_checkpoint(path: str) -> bytes:
+    """Helper to read checkpoint file from volume."""
+    with open(path, 'rb') as f:
+        return f.read()
+
 
 @app.function(
     image=image,
@@ -132,6 +205,7 @@ def upload_dataset():
     volumes={
         "/mnt/model": model_volume,
         "/mnt/dataset": dataset_volume,
+        "/mnt/checkpoints": checkpoint_volume,  # Persist checkpoints
     },
     timeout=14400,  # 4-hour timeout for longer training
     max_containers=1,  # Only one training job at a time
