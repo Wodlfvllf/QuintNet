@@ -4,20 +4,20 @@ GPT-2 Pipeline Stage with Tensor Parallelism Support
 A GPT2Stage represents one segment of the GPT-2 model for Pipeline Parallelism.
 Each PP rank owns exactly one stage containing a subset of transformer blocks.
 
+Weight Tying:
+    GPT-2 uses weight tying between input embeddings (wte) and output projection (lm_head).
+    Since these are on different stages (first vs last), we copy wte to both stages
+    and sync gradients after backward pass.
+
 Stage Structure by PP rank:
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │  PP=2 Example (12 blocks total)                                             │
 │                                                                             │
 │  Stage 0 (pp_rank=0):                  Stage 1 (pp_rank=1):                 │
-│  ├── embedding (wte + wpe)             ├── blocks[6..11]                    │
-│  ├── blocks[0..5]                      └── ln_f (final layer norm)          │
-│  └── (no ln_f)                                                              │
-├─────────────────────────────────────────────────────────────────────────────┤
-│  PP=4 Example (12 blocks total)                                             │
-│                                                                             │
-│  Stage 0:        Stage 1:        Stage 2:        Stage 3:                   │
-│  ├── embedding   ├── blocks[3..5]├── blocks[6..8]├── blocks[9..11]          │
-│  ├── blocks[0..2]                                └── ln_f                   │
+│  ├── embedding.wte [50257, 768]        ├── blocks[6..11]                    │
+│  ├── embedding.wpe [1024, 768]         ├── ln_f                             │
+│  ├── blocks[0..5]                      └── lm_head_weight [50257, 768]      │
+│  └── (sends hidden to Stage 1)              ↑ COPY of wte (for weight tying)│
 └─────────────────────────────────────────────────────────────────────────────┘
 """
 
@@ -35,7 +35,11 @@ class GPT2Stage(nn.Module):
     
     Contains a subset of transformer blocks, plus optionally:
     - Embeddings (only first stage, pp_rank=0)
-    - Final LayerNorm (only last stage, pp_rank=pp_size-1)
+    - Final LayerNorm + lm_head (only last stage, pp_rank=pp_size-1)
+    
+    Weight Tying:
+        wte is copied to both first stage (embedding) and last stage (lm_head).
+        Gradients must be synced between stages after backward pass.
     """
     
     def __init__(
@@ -43,18 +47,29 @@ class GPT2Stage(nn.Module):
         embedding: GPT2Embedding,
         blocks: nn.ModuleList,
         ln_f: nn.LayerNorm,
+        lm_head_weight: nn.Parameter,
         is_first_stage: bool,
         is_last_stage: bool,
+        pp_group: dist.ProcessGroup = None,
     ):
         super().__init__()
         
         self.is_first_stage = is_first_stage
         self.is_last_stage = is_last_stage
+        self.pp_group = pp_group
         
         # Conditionally set components
         self.embedding = embedding if is_first_stage else None
         self.blocks = blocks
         self.ln_f = ln_f if is_last_stage else None
+        
+        # ─────────────────────────────────────────────────────────────────
+        # Weight Tying: lm_head uses a COPY of wte (on last stage only)
+        # ─────────────────────────────────────────────────────────────────
+        if is_last_stage and lm_head_weight is not None:
+            self.lm_head_weight = lm_head_weight  # nn.Parameter
+        else:
+            self.lm_head_weight = None
     
     def forward(self, x: torch.Tensor, position_ids: torch.Tensor = None) -> torch.Tensor:
         """
@@ -66,7 +81,8 @@ class GPT2Stage(nn.Module):
             position_ids: Position IDs [B, T] (only used by first stage)
         
         Returns:
-            hidden_states: [B, T, embed_dim]
+            For last stage: logits [B, T, vocab_size]
+            For other stages: hidden_states [B, T, embed_dim]
         """
         # ─────────────────────────────────────────────────────────────────
         # First stage: Apply embeddings to convert token IDs to vectors
@@ -81,12 +97,48 @@ class GPT2Stage(nn.Module):
             x = block(x)  # [B, T, 768] → [B, T, 768]
         
         # ─────────────────────────────────────────────────────────────────
-        # Last stage: Apply final layer norm
+        # Last stage: Apply final layer norm and compute logits
         # ─────────────────────────────────────────────────────────────────
         if self.is_last_stage:
-            x = self.ln_f(x)  # [B, T, 768] → [B, T, 768]
+            x = self.ln_f(x)  # [B, T, 768]
+            
+            # Compute logits using lm_head (which is a copy of wte)
+            # logits = hidden_states @ wte.T
+            if self.lm_head_weight is not None:
+                x = x @ self.lm_head_weight.T  # [B, T, 768] @ [768, 50257] → [B, T, 50257]
         
         return x
+    
+    def sync_tied_weights_grad(self):
+        """
+        Synchronize gradients for tied weights (wte / lm_head) between first and last stage.
+        
+        Call this AFTER loss.backward() and BEFORE optimizer.step().
+        
+        This averages the gradients from:
+        - First stage: embedding.wte.weight.grad
+        - Last stage: lm_head_weight.grad
+        """
+        if self.pp_group is None:
+            return
+        
+        if self.is_first_stage and self.embedding is not None:
+            # Average gradients with last stage
+            if self.embedding.wte.weight.grad is not None:
+                dist.all_reduce(
+                    self.embedding.wte.weight.grad, 
+                    op=dist.ReduceOp.AVG, 
+                    group=self.pp_group
+                )
+        
+        if self.is_last_stage and self.lm_head_weight is not None:
+            # Average gradients with first stage
+            if self.lm_head_weight.grad is not None:
+                dist.all_reduce(
+                    self.lm_head_weight.grad, 
+                    op=dist.ReduceOp.AVG, 
+                    group=self.pp_group
+                )
     
     @classmethod
     def from_sharded_state_dict(
@@ -98,6 +150,7 @@ class GPT2Stage(nn.Module):
         tp_rank: int,
         tp_size: int,
         tp_group: dist.ProcessGroup,
+        pp_group: dist.ProcessGroup,
         device: torch.device,
     ) -> "GPT2Stage":
         """
@@ -114,6 +167,7 @@ class GPT2Stage(nn.Module):
             tp_rank: This GPU's tensor parallel rank
             tp_size: Total tensor parallel size
             tp_group: Tensor parallel process group
+            pp_group: Pipeline parallel process group (for weight sync)
             device: Device for this GPU
         
         Returns:
@@ -132,12 +186,15 @@ class GPT2Stage(nn.Module):
         # Build Embedding (only first stage)
         # ═══════════════════════════════════════════════════════════════════
         embedding = None
+        wte_weight = None
+        
         if is_first_stage:
+            wte_weight = state_dict['wte.weight']
             embedding = GPT2Embedding(
                 vocab_size=config.vocab_size,
                 max_position_embeddings=config.n_positions,
                 embed_dim=embed_dim,
-                wte_weights=state_dict['wte.weight'],
+                wte_weights=wte_weight,
                 wpe_weights=state_dict['wpe.weight'],
                 dropout_prob=config.embd_pdrop,
                 device=device,
@@ -177,23 +234,43 @@ class GPT2Stage(nn.Module):
         blocks = nn.ModuleList(blocks)
         
         # ═══════════════════════════════════════════════════════════════════
-        # Build Final LayerNorm (only last stage)
+        # Build Final LayerNorm + lm_head (only last stage)
         # ═══════════════════════════════════════════════════════════════════
         ln_f = None
+        lm_head_weight = None
+        
         if is_last_stage:
+            # Final LayerNorm
             ln_f = nn.LayerNorm(embed_dim, device=device)
             with torch.no_grad():
                 ln_f.weight.copy_(state_dict['ln_f.weight'])
                 ln_f.bias.copy_(state_dict['ln_f.bias'])
+            
+            # ─────────────────────────────────────────────────────────────────
+            # Weight Tying: Copy wte to last stage for lm_head
+            # Note: state_dict should have 'wte.weight' copied for last stage
+            # ─────────────────────────────────────────────────────────────────
+            if 'wte.weight' in state_dict:
+                lm_head_weight = nn.Parameter(
+                    state_dict['wte.weight'].clone().to(device)
+                )
+            else:
+                # If wte not in state_dict for last stage, we need to handle this
+                # This shouldn't happen if load_gpt2_distributed is correctly implemented
+                raise ValueError(
+                    "wte.weight not found in state_dict for last stage. "
+                    "Ensure load_gpt2_distributed includes wte.weight for last stage (weight tying)."
+                )
         
         # ═══════════════════════════════════════════════════════════════════
         # Create and return the stage instance
-        # This calls __init__(embedding, blocks, ln_f, is_first, is_last)
         # ═══════════════════════════════════════════════════════════════════
         return cls(
             embedding=embedding,
             blocks=blocks,
             ln_f=ln_f,
+            lm_head_weight=lm_head_weight,
             is_first_stage=is_first_stage,
             is_last_stage=is_last_stage,
+            pp_group=pp_group,
         )
