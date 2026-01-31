@@ -1,0 +1,395 @@
+"""
+High-Level GPT-2 Trainer for QuintNet
+
+This module provides a specialized `GPT2Trainer` class for training GPT-2 models
+with 3D parallelism (DP + PP + TP) on causal language modeling tasks like summarization.
+
+===============================================================================
+KEY DIFFERENCES FROM CLASSIFICATION TRAINER:
+===============================================================================
+
+1. **Loss Function**: CrossEntropyLoss with ignore_index=-100 for padding
+2. **Metrics**: Perplexity (exp(loss)) instead of accuracy  
+3. **Batch Format**: input_ids, labels, attention_mask instead of images
+4. **Weight Tying**: Calls sync_tied_weights_grad() after backward pass
+5. **Position IDs**: Generates position IDs for GPT-2 forward pass
+
+===============================================================================
+USAGE EXAMPLE:
+===============================================================================
+
+.. code-block:: python
+
+    from QuintNet.GPT2_Trainer import GPT2Trainer
+    from QuintNet.utils.Dataloader import SummarizationDataset, SummarizationCollator
+    
+    # Setup data
+    tokenizer = GPT2Tokenizer.from_pretrained('gpt2')
+    train_dataset = SummarizationDataset('./data', split='train')
+    collator = SummarizationCollator(tokenizer)
+    train_loader = DataLoader(train_dataset, collate_fn=collator, batch_size=8)
+    
+    # Setup model with 3D parallelism
+    strategy = get_strategy('3d', pg_manager, config, checkpoint_path=..., is_staged=True)
+    model = strategy.apply(None)  # Model built from checkpoint
+    
+    # Train
+    trainer = GPT2Trainer(model, train_loader, val_loader, config, pg_manager)
+    trainer.fit()
+
+===============================================================================
+"""
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import torch.optim as optim
+import torch.distributed as dist
+from tqdm import tqdm
+import os
+import math
+
+from .parallelism import PipelineTrainer, PipelineDataLoader
+from .core.process_groups import ProcessGroupManager
+from .utils import SummarizationDataLoader, SummarizationCollator, SummarizationDataset
+
+class GPT2Trainer:
+    """
+    Trainer for GPT-2 causal language modeling with 3D parallelism.
+    
+    Handles:
+    - CLM loss computation with padding ignored
+    - Perplexity metrics
+    - Weight tying gradient synchronization
+    - Pipeline parallel scheduling
+    """
+    
+    def __init__(
+        self, 
+        model: nn.Module, 
+        train_loader, 
+        val_loader, 
+        config: dict, 
+        pg_manager: ProcessGroupManager,
+        model_config = None,  # GPT2Config object for model params
+    ):
+        """
+        Initialize the GPT2Trainer.
+        
+        Args:
+            model: Parallelized GPT-2 model from strategy.apply()
+            train_loader: DataLoader with SummarizationCollator
+            val_loader: Validation DataLoader
+            config: Training config dict
+            pg_manager: Process group manager
+            model_config: Optional GPT2Config for model parameters
+        """
+        self.model = model
+        self.train_loader = train_loader
+        self.val_loader = val_loader
+        self.config = config
+        self.pg_manager = pg_manager
+        self.model_config = model_config
+        
+        self.device = torch.device(f"cuda:{os.environ.get('LOCAL_RANK', 0)}")
+        self.global_rank = dist.get_rank()
+        
+        # ─────────────────────────────────────────────────────────────────
+        # Optimizer: AdamW is standard for language models
+        # ─────────────────────────────────────────────────────────────────
+        self.optimizer = optim.AdamW(
+            self.model.parameters(), 
+            lr=float(self.config['learning_rate']),
+            weight_decay=0.01,
+        )
+        
+        # ─────────────────────────────────────────────────────────────────
+        # Loss: CrossEntropy with ignore_index for padding tokens (-100)
+        # ─────────────────────────────────────────────────────────────────
+        self.criterion = nn.CrossEntropyLoss(ignore_index=-100)
+        
+        # Get vocab size from model config or default
+        if model_config is not None:
+            self.vocab_size = model_config.vocab_size
+        else:
+            self.vocab_size = self.config.get('vocab_size', 50257)
+        
+        # ─────────────────────────────────────────────────────────────────
+        # Pipeline parallelism setup
+        # ─────────────────────────────────────────────────────────────────
+        self.pp_size = self.config['mesh_dim'][self.config['mesh_name'].index('pp')]
+        self.is_pipeline = self.pp_size > 1
+        
+        # Get pipeline rank info for weight tying sync
+        coords = self.pg_manager.get_coordinates_tensor_search(self.global_rank)
+        self.pp_rank = coords[self.config['mesh_name'].index('pp')]
+        self.is_first_stage = (self.pp_rank == 0)
+        self.is_last_stage = (self.pp_rank == self.pp_size - 1)
+        
+        if self.is_pipeline:
+            self._setup_pipeline_training()
+        
+        # ─────────────────────────────────────────────────────────────────
+        # Get reference to the underlying GPT2Stage for weight sync
+        # ─────────────────────────────────────────────────────────────────
+        self.gpt2_stage = self._get_gpt2_stage()
+    
+    def _get_gpt2_stage(self):
+        """
+        Extract the GPT2Stage module from wrapped model.
+        
+        The model is wrapped as: DataParallel -> PipelineParallelWrapper -> GPT2Stage
+        """
+        if hasattr(self.model, 'model') and hasattr(self.model.model, 'local_module'):
+            return self.model.model.local_module
+        elif hasattr(self.model, 'local_module'):
+            return self.model.local_module
+        else:
+            return self.model
+    
+    def _setup_pipeline_training(self):
+        """Setup pipeline trainer and data loader for PP."""
+        pp_group = self.pg_manager.get_group('pp')
+        
+        # Create pipeline trainer with task_type='clm' for GPT-2
+        self.pipeline_trainer = PipelineTrainer(
+            model=self.model,
+            device_mesh=self.pg_manager.device_mesh,
+            pp_rank=self.pp_rank,
+            pp_group=pp_group,
+            criterion=self.criterion,
+            device=self.device,
+            optimizer=self.optimizer,
+            max_grad_norm=float(self.config['max_grad_norm']),
+            schedule_type=self.config.get('schedule', '1f1b'),
+            task_type='clm',  # GPT-2 uses causal language modeling
+            vocab_size=self.vocab_size,
+        )
+        
+        # Wrap DataLoader with task_type='clm' for proper batch handling
+        self.train_loader = PipelineDataLoader(
+            self.train_loader, 
+            self.config['grad_acc_steps'],
+            task_type='clm'
+        )
+        
+        # Calculate tensor shapes for pipeline communication
+        dp_size = self.config['mesh_dim'][self.config['mesh_name'].index('dp')]
+        micro_batch_size = self.config['batch_size'] // (self.config['grad_acc_steps'] * dp_size)
+        if micro_batch_size < 1:
+            micro_batch_size = 1
+        
+        max_seq_length = self.config.get('max_seq_length', 512)
+        hidden_dim = self.model_config.n_embd if self.model_config else 768
+        
+        # Tensor shape: [batch, seq_len, hidden_dim]
+        self.tensor_shapes = (micro_batch_size, max_seq_length, hidden_dim)
+    
+    def fit(self):
+        """Main training loop."""
+        best_val_ppl = float('inf')
+        
+        for epoch in range(self.config['num_epochs']):
+            if self.global_rank == 0:
+                print(f"\nEpoch {epoch+1}/{self.config['num_epochs']}\n" + "-" * 50)
+            
+            train_loss, train_ppl = self._train_epoch(epoch)
+            val_loss, val_ppl = self._validate_epoch(epoch)
+            
+            # Aggregate metrics for pipeline parallelism
+            if self.is_pipeline:
+                metrics_tensor = torch.zeros(4, device=self.device)
+                
+                if self.is_last_stage:
+                    metrics_tensor[0] = train_loss if train_loss is not None else 0.0
+                    metrics_tensor[1] = train_ppl if train_ppl is not None else 0.0
+                    metrics_tensor[2] = val_loss if val_loss is not None else 0.0
+                    metrics_tensor[3] = val_ppl if val_ppl is not None else 0.0
+                
+                dist.all_reduce(metrics_tensor, op=dist.ReduceOp.MAX)
+                
+                train_loss = metrics_tensor[0].item()
+                train_ppl = metrics_tensor[1].item()
+                val_loss = metrics_tensor[2].item()
+                val_ppl = metrics_tensor[3].item()
+            
+            if self.global_rank == 0:
+                print(f"Epoch {epoch+1} Results:")
+                print(f"  Train Loss: {train_loss:.4f} | Train PPL: {train_ppl:.2f}")
+                print(f"  Val Loss:   {val_loss:.4f} | Val PPL:   {val_ppl:.2f}")
+                
+                if val_ppl < best_val_ppl:
+                    best_val_ppl = val_ppl
+                    self._save_checkpoint('best_model.pt')
+                    print(f"  ✅ New best model saved (PPL: {best_val_ppl:.2f})")
+        
+        if self.global_rank == 0:
+            print("\nTraining complete.")
+            self._save_checkpoint('final_model.pt')
+    
+    def _train_epoch(self, epoch: int):
+        """Train for one epoch."""
+        self.model.train()
+        
+        if self.is_pipeline:
+            return self._train_epoch_pipeline(epoch)
+        else:
+            return self._train_epoch_standard(epoch)
+    
+    def _train_epoch_standard(self, epoch: int):
+        """Standard training loop (no pipeline parallelism)."""
+        total_loss = 0.0
+        total_tokens = 0
+        
+        pbar = tqdm(self.train_loader, desc=f"Training Epoch {epoch+1}", disable=(self.global_rank != 0))
+        
+        for batch in pbar:
+            input_ids = batch['input_ids'].to(self.device, non_blocking=True)
+            labels = batch['labels'].to(self.device, non_blocking=True)
+            attention_mask = batch['attention_mask'].to(self.device, non_blocking=True)
+            
+            # Create position IDs
+            batch_size, seq_len = input_ids.shape
+            position_ids = torch.arange(seq_len, device=self.device).unsqueeze(0).expand(batch_size, -1)
+            
+            self.optimizer.zero_grad()
+            
+            # Forward pass
+            logits = self.model(input_ids, position_ids=position_ids)
+            
+            # Compute loss (reshape for CrossEntropyLoss)
+            # logits: [B, T, V] -> [B*T, V]
+            # labels: [B, T] -> [B*T]
+            loss = self.criterion(
+                logits.view(-1, self.vocab_size),
+                labels.view(-1)
+            )
+            
+            # Backward pass
+            loss.backward()
+            
+            # ─────────────────────────────────────────────────────────────
+            # CRITICAL: Sync tied weight gradients between first and last stages
+            # ─────────────────────────────────────────────────────────────
+            if hasattr(self.gpt2_stage, 'sync_tied_weights_grad'):
+                self.gpt2_stage.sync_tied_weights_grad()
+            
+            # Gradient clipping
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config['max_grad_norm'])
+            
+            self.optimizer.step()
+            
+            # Accumulate metrics (only count non-padding tokens)
+            num_tokens = (labels != -100).sum().item()
+            total_loss += loss.item() * num_tokens
+            total_tokens += num_tokens
+            
+            if self.global_rank == 0:
+                current_ppl = math.exp(loss.item()) if loss.item() < 20 else float('inf')
+                pbar.set_postfix({'Loss': f'{loss.item():.4f}', 'PPL': f'{current_ppl:.2f}'})
+        
+        # Aggregate across DP ranks
+        if dist.is_initialized() and dist.get_world_size() > 1:
+            loss_tensor = torch.tensor(total_loss, device=self.device)
+            tokens_tensor = torch.tensor(total_tokens, device=self.device)
+            dist.all_reduce(loss_tensor, op=dist.ReduceOp.SUM)
+            dist.all_reduce(tokens_tensor, op=dist.ReduceOp.SUM)
+            total_loss = loss_tensor.item()
+            total_tokens = tokens_tensor.item()
+        
+        avg_loss = total_loss / total_tokens if total_tokens > 0 else 0
+        perplexity = math.exp(avg_loss) if avg_loss < 20 else float('inf')
+        
+        return avg_loss, perplexity
+    
+    def _train_epoch_pipeline(self, epoch: int):
+        """Training loop with pipeline parallelism."""
+        total_loss = 0.0
+        num_steps = 0
+        
+        num_optimizer_steps = len(self.train_loader.dataloader) // self.config['grad_acc_steps']
+        if num_optimizer_steps < 1:
+            num_optimizer_steps = 1
+        
+        for step in range(num_optimizer_steps):
+            step_loss, step_ppl = self.pipeline_trainer.train_step(
+                self.train_loader,
+                self.tensor_shapes,
+                self.device,
+                torch.float32,
+            )
+            
+            # Sync tied weights after each optimization step
+            if hasattr(self.gpt2_stage, 'sync_tied_weights_grad'):
+                self.gpt2_stage.sync_tied_weights_grad()
+            
+            if step_loss is not None:
+                total_loss += step_loss
+                num_steps += 1
+        
+        if num_steps > 0:
+            avg_loss = total_loss / num_steps
+            perplexity = math.exp(avg_loss) if avg_loss < 20 else float('inf')
+            return avg_loss, perplexity
+        else:
+            return None, None
+    
+    def _validate_epoch(self, epoch: int):
+        """Validation loop."""
+        self.model.eval()
+        total_loss = 0.0
+        total_tokens = 0
+        
+        if self.is_pipeline:
+            # TODO: Implement pipeline validation for GPT-2
+            return 0.0, 0.0
+        
+        with torch.no_grad():
+            pbar = tqdm(self.val_loader, desc=f"Validating Epoch {epoch+1}", disable=(self.global_rank != 0))
+            
+            for batch in pbar:
+                input_ids = batch['input_ids'].to(self.device, non_blocking=True)
+                labels = batch['labels'].to(self.device, non_blocking=True)
+                
+                batch_size, seq_len = input_ids.shape
+                position_ids = torch.arange(seq_len, device=self.device).unsqueeze(0).expand(batch_size, -1)
+                
+                logits = self.model(input_ids, position_ids=position_ids)
+                
+                loss = self.criterion(
+                    logits.view(-1, self.vocab_size),
+                    labels.view(-1)
+                )
+                
+                num_tokens = (labels != -100).sum().item()
+                total_loss += loss.item() * num_tokens
+                total_tokens += num_tokens
+        
+        # Aggregate across ranks
+        if dist.is_initialized() and dist.get_world_size() > 1:
+            loss_tensor = torch.tensor(total_loss, device=self.device)
+            tokens_tensor = torch.tensor(total_tokens, device=self.device)
+            dist.all_reduce(loss_tensor, op=dist.ReduceOp.SUM)
+            dist.all_reduce(tokens_tensor, op=dist.ReduceOp.SUM)
+            total_loss = loss_tensor.item()
+            total_tokens = tokens_tensor.item()
+        
+        avg_loss = total_loss / total_tokens if total_tokens > 0 else 0
+        perplexity = math.exp(avg_loss) if avg_loss < 20 else float('inf')
+        
+        return avg_loss, perplexity
+    
+    def _save_checkpoint(self, path: str):
+        """Save model checkpoint."""
+        if hasattr(self.model, 'model') and hasattr(self.model.model, 'local_module'):
+            state_dict = {'pipeline_stage': self.model.model.local_module.state_dict()}
+        elif hasattr(self.model, 'module'):
+            state_dict = self.model.module.state_dict()
+        else:
+            state_dict = self.model.state_dict()
+        
+        torch.save({
+            'model_state_dict': state_dict,
+            'optimizer_state_dict': self.optimizer.state_dict(),
+            'config': self.config,
+        }, path)
