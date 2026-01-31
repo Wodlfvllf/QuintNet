@@ -13,7 +13,7 @@ from ..parallelism import PipelineParallelWrapper
 from ..parallelism import DataParallel
 from ..parallelism.data_parallel.core.config import DistributedConfig
 from ..core import load_gpt2_distributed
-from ..utils.GPT2.gpt2_stage import GPT2Stage
+from ..utils.GPT2 import GPT2Stage, GPT2Config
 
 class Hybrid3DCoordinator(BaseCoordinator):
     """
@@ -100,13 +100,25 @@ class Hybrid3DCoordinator(BaseCoordinator):
         pp_size = self.config['mesh_dim'][self.config['mesh_name'].index('pp')]
         
         # ─────────────────────────────────────────────────────────────────
+        # Convert dict config to GPT2Config object
+        # self.config has both training params (batch_size, mesh_dim) and
+        # model params (model_config sub-dict). Extract model_config.
+        # ─────────────────────────────────────────────────────────────────
+        if 'model_config' in self.config:
+            model_config = GPT2Config.from_dict(self.config['model_config'])
+        else:
+            # Fallback: try to create from top-level config or use defaults
+            model_config = GPT2Config.from_dict(self.config)
+        
+        # ─────────────────────────────────────────────────────────────────
         # 1. Load sharded weights from checkpoint
         # Each GPU loads only its required portion (memory efficient!)
         # ─────────────────────────────────────────────────────────────────
         state_dict = load_gpt2_distributed(
             checkpoint_path=self.checkpoint_path,
             pg_manager=self.pg_manager,
-            config=self.config,
+            config=self.config,  # Dict for mesh params
+            model_config=model_config,  # GPT2Config for model params
             device=device,
         )
         
@@ -116,12 +128,13 @@ class Hybrid3DCoordinator(BaseCoordinator):
         # ─────────────────────────────────────────────────────────────────
         stage = GPT2Stage.from_sharded_state_dict(
             state_dict=state_dict,
-            config=self.config,
+            config=model_config,  # GPT2Config object
             pp_rank=pp_rank,
             pp_size=pp_size,
             tp_rank=tp_rank,
             tp_size=tp_size,
             tp_group=tp_group,
+            pp_group=pp_group,  # For weight tying gradient sync
             device=device,
         )
         
