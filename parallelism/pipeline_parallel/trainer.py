@@ -140,14 +140,24 @@ class PipelineTrainer:
             perplexity for CLM. Only on the last rank of the pipeline.
         """
         import math
+        from tqdm import tqdm
         
         self.model.eval()
         total_loss = 0.0
         total_correct = 0
         total_samples = 0  # For classification: number of samples; for CLM: number of tokens
+        num_batches = 0
+        
+        # Progress bar for validation (only show on first stage)
+        pbar = tqdm(
+            val_loader,
+            desc="Validation [Pipeline]",
+            disable=(not self.is_first_stage),
+            ncols=100,
+        )
         
         with torch.no_grad():
-            for i, batch in enumerate(val_loader):
+            for i, batch in enumerate(pbar):
                 # Receive activation from previous stage (None for first stage)
                 input_tensor = pipeline_communicate(
                     operation='recv_forward',
