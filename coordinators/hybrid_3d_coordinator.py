@@ -158,8 +158,8 @@ class Hybrid3DCoordinator(BaseCoordinator):
         # ─────────────────────────────────────────────────────────────────
         dp_group = self.pg_manager.get_group('dp')
         dp_config = DistributedConfig(
-            rank=self.pg_manager.get_rank('dp'),
-            world_size=self.pg_manager.get_world_size('dp'),
+            rank=dist.get_rank(dp_group),
+            world_size=dist.get_world_size(dp_group),
             process_group=dp_group,
             broadcast_buffers=True,
         )
