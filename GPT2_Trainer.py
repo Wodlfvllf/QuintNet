@@ -455,11 +455,15 @@ class GPT2Trainer:
         Save model checkpoint.
         
         In 3D parallelism mode, each rank saves its shard with naming:
-            {path}_pp{pp_rank}_tp{tp_rank}.pt
+            {output_dir}/{name}_pp{pp_rank}_tp{tp_rank}.pt
         
         The shards can be merged later using the merge_checkpoints utility.
         """
         import os
+        
+        # Get output directory from config (default: current dir)
+        output_dir = self.config.get('output_dir', '.')
+        os.makedirs(output_dir, exist_ok=True)
         
         # Get parallelism info
         pp_rank = getattr(self, 'pp_rank', 0)
@@ -479,9 +483,9 @@ class GPT2Trainer:
         else:
             state_dict = self.model.state_dict()
         
-        # Create filename with rank info
-        base_path = path.replace('.pt', '')
-        shard_path = f"{base_path}_pp{pp_rank}_tp{tp_rank}.pt"
+        # Create filename with rank info in output_dir
+        name = path.replace('.pt', '')
+        shard_path = os.path.join(output_dir, f"{name}_pp{pp_rank}_tp{tp_rank}.pt")
         
         # Save with metadata
         checkpoint = {
