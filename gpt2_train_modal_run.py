@@ -761,10 +761,16 @@ def merge_and_test_model(
         print(f"   ✓ Combined {pp_size} pipeline stages")
     
     # ─────────────────────────────────────────────────────────────────────────
-    # STEP 4: Load into HuggingFace GPT2LMHeadModel
+    # STEP 4: Convert keys and load into HuggingFace GPT2LMHeadModel
     # ─────────────────────────────────────────────────────────────────────────
     print("\n🤖 STEP 4: Loading merged model...")
     from transformers import GPT2LMHeadModel, GPT2Config, GPT2Tokenizer
+    
+    # Print sample keys for debugging
+    sample_keys = list(merged_state.keys())[:10]
+    print(f"   Sample checkpoint keys:")
+    for k in sample_keys:
+        print(f"      - {k}")
     
     config = GPT2Config(
         vocab_size=50257,
@@ -777,33 +783,91 @@ def merge_and_test_model(
     
     model = GPT2LMHeadModel(config)
     
-    # Try to load state dict (handle different formats)
-    try:
-        missing, unexpected = model.load_state_dict(merged_state, strict=False)
-        print(f"   Missing keys: {len(missing)}")
-        print(f"   Unexpected keys: {len(unexpected)}")
-        if len(unexpected) < 10:
-            for k in unexpected[:5]:
-                print(f"      - {k}")
-    except Exception as e:
-        print(f"   ⚠️  Direct load failed: {e}")
-        print("   Trying with 'transformer.' prefix...")
+    # ─────────────────────────────────────────────────────────────────────────
+    # Convert QuintNet keys to HuggingFace format
+    # QuintNet: blocks.X.attn.c_attn.weight, blocks.X.ln1.weight, etc.
+    # HuggingFace: transformer.h.X.attn.c_attn.weight, transformer.h.X.ln_1.weight, etc.
+    # ─────────────────────────────────────────────────────────────────────────
+    print("\n   🔄 Converting keys to HuggingFace format...")
+    
+    hf_state = {}
+    converted_count = 0
+    
+    for key, value in merged_state.items():
+        new_key = key
+        need_transpose = False
         
-        # Add transformer prefix if needed
-        prefixed_state = {}
-        for k, v in merged_state.items():
-            if not k.startswith("transformer.") and not k.startswith("lm_head"):
-                prefixed_state[f"transformer.{k}"] = v
-            else:
-                prefixed_state[k] = v
+        # Convert block naming: blocks.X -> transformer.h.X
+        if key.startswith("blocks."):
+            new_key = key.replace("blocks.", "transformer.h.")
         
-        # Handle weight tying
-        if "transformer.wte.weight" in prefixed_state:
-            prefixed_state["lm_head.weight"] = prefixed_state["transformer.wte.weight"]
+        # Convert layer norm naming: ln1 -> ln_1, ln2 -> ln_2
+        new_key = new_key.replace(".ln1.", ".ln_1.")
+        new_key = new_key.replace(".ln2.", ".ln_2.")
         
-        missing, unexpected = model.load_state_dict(prefixed_state, strict=False)
-        print(f"   Missing keys: {len(missing)}")
-        print(f"   Unexpected keys: {len(unexpected)}")
+        # Add transformer prefix for embeddings
+        if key.startswith("wte.") or key.startswith("wpe."):
+            new_key = "transformer." + key
+        elif key == "token_embedding.weight":
+            new_key = "transformer.wte.weight"
+        elif key == "position_embedding.weight":
+            new_key = "transformer.wpe.weight"
+        
+        # Handle final layer norm
+        if "final_ln." in key or (key.startswith("ln_f.") and not key.startswith("transformer.")):
+            new_key = "transformer.ln_f." + key.split(".")[-1]
+        
+        # Handle attention/MLP weights - need transpose for Conv1D -> Linear
+        # HuggingFace GPT-2 uses Conv1D which stores weights as (in_features, out_features)
+        # Our Linear layers store as (out_features, in_features), so we need to transpose
+        if "c_attn.weight" in key or "c_proj.weight" in key:
+            value = value.t().contiguous()
+            need_transpose = True
+        elif "c_fc.weight" in key or "mlp.c_proj.weight" in key:
+            value = value.t().contiguous()
+            need_transpose = True
+        
+        hf_state[new_key] = value
+        converted_count += 1
+        
+        if converted_count <= 5:
+            trans_str = " (transposed)" if need_transpose else ""
+            print(f"      {key} -> {new_key}{trans_str}")
+    
+    print(f"   ... converted {converted_count} keys total")
+    
+    # Handle weight tying for lm_head
+    if "transformer.wte.weight" in hf_state and "lm_head.weight" not in hf_state:
+        hf_state["lm_head.weight"] = hf_state["transformer.wte.weight"]
+        print("   ✓ Tied lm_head.weight to transformer.wte.weight")
+    
+    # Load state dict
+    print("\n   📥 Loading state dict...")
+    missing, unexpected = model.load_state_dict(hf_state, strict=False)
+    
+    print(f"   Missing keys: {len(missing)}")
+    if len(missing) > 0 and len(missing) <= 10:
+        for k in missing:
+            print(f"      ❌ {k}")
+    elif len(missing) > 10:
+        for k in missing[:5]:
+            print(f"      ❌ {k}")
+        print(f"      ... and {len(missing) - 5} more")
+    
+    print(f"   Unexpected keys: {len(unexpected)}")
+    if len(unexpected) > 0 and len(unexpected) <= 10:
+        for k in unexpected:
+            print(f"      ⚠️  {k}")
+    elif len(unexpected) > 10:
+        for k in unexpected[:5]:
+            print(f"      ⚠️  {k}")
+        print(f"      ... and {len(unexpected) - 5} more")
+    
+    # Warn if too many mismatches
+    if len(missing) > 10 or len(unexpected) > 10:
+        print("\n   ⚠️  WARNING: Many key mismatches! Model may not load correctly.")
+        print("   Expected HuggingFace keys look like: transformer.h.0.attn.c_attn.weight")
+        print("   Check if your checkpoint uses different naming.")
     
     model = model.to(device)
     model.eval()
