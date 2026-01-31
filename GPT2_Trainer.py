@@ -217,15 +217,27 @@ class GPT2Trainer:
                 print(f"Epoch {epoch+1} Results:")
                 print(f"  Train Loss: {train_loss:.4f} | Train PPL: {train_ppl:.2f}")
                 print(f"  Val Loss:   {val_loss:.4f} | Val PPL:   {val_ppl:.2f}")
-                
-                if val_ppl < best_val_ppl:
-                    best_val_ppl = val_ppl
-                    self._save_checkpoint('best_model.pt')
+            
+            # Save checkpoint from ALL ranks (each saves its shard)
+            if val_ppl < best_val_ppl:
+                best_val_ppl = val_ppl
+                if dist.is_initialized():
+                    dist.barrier()  # Sync before saving
+                self._save_checkpoint('best_model.pt')
+                if dist.is_initialized():
+                    dist.barrier()  # Sync after saving
+                if self.global_rank == 0:
                     print(f"  ✅ New best model saved (PPL: {best_val_ppl:.2f})")
+        
+        # Final save from ALL ranks
+        if dist.is_initialized():
+            dist.barrier()
+        self._save_checkpoint('final_model.pt')
+        if dist.is_initialized():
+            dist.barrier()
         
         if self.global_rank == 0:
             print("\nTraining complete.")
-            self._save_checkpoint('final_model.pt')
             
             # Run generation-based evaluation (ROUGE/BLEU)
             if self.config.get('compute_generation_metrics', True):
@@ -413,19 +425,56 @@ class GPT2Trainer:
         return avg_loss, perplexity
     
     def _save_checkpoint(self, path: str):
-        """Save model checkpoint."""
+        """
+        Save model checkpoint.
+        
+        In 3D parallelism mode, each rank saves its shard with naming:
+            {path}_pp{pp_rank}_tp{tp_rank}.pt
+        
+        The shards can be merged later using the merge_checkpoints utility.
+        """
+        import os
+        
+        # Get parallelism info
+        pp_rank = getattr(self, 'pp_rank', 0)
+        tp_rank = 0
+        if hasattr(self, 'pg_manager'):
+            try:
+                tp_group = self.pg_manager.get_group('tp')
+                tp_rank = dist.get_rank(tp_group)
+            except:
+                pass
+        
+        # Extract state dict
         if hasattr(self.model, 'model') and hasattr(self.model.model, 'local_module'):
-            state_dict = {'pipeline_stage': self.model.model.local_module.state_dict()}
+            state_dict = self.model.model.local_module.state_dict()
         elif hasattr(self.model, 'module'):
             state_dict = self.model.module.state_dict()
         else:
             state_dict = self.model.state_dict()
         
-        torch.save({
+        # Create filename with rank info
+        base_path = path.replace('.pt', '')
+        shard_path = f"{base_path}_pp{pp_rank}_tp{tp_rank}.pt"
+        
+        # Save with metadata
+        checkpoint = {
             'model_state_dict': state_dict,
-            'optimizer_state_dict': self.optimizer.state_dict(),
+            'optimizer_state_dict': self.optimizer.state_dict() if self.optimizer else None,
             'config': self.config,
-        }, path)
+            'parallelism_info': {
+                'pp_rank': pp_rank,
+                'tp_rank': tp_rank,
+                'pp_size': getattr(self, 'pp_size', 1),
+                'tp_size': self.config.get('tp_size', 1),
+                'dp_size': self.config.get('dp_size', 1),
+            }
+        }
+        
+        torch.save(checkpoint, shard_path)
+        
+        if self.global_rank == 0:
+            print(f"  💾 Saved shard: {shard_path}")
     
     def _evaluate_generation_metrics(self):
         """
