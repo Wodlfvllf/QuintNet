@@ -114,12 +114,24 @@ def main():
     dataset_path = Path(args.dataset)
     
     train_dataset = SummarizationDataset(dataset_path, split='train')
-    if args.max_samples is not None:
+    
+    # Allow controlling dataset size via config or CLI (config takes precedence if both exist, or CLI overrides? Usually CLI overrides config)
+    # But user asked to embed in config. Let's support both: CLI > Config > None.
+    max_samples = args.max_samples if args.max_samples is not None else config.get('max_samples', None)
+    
+    if max_samples is not None:
         if global_rank == 0:
-            print(f"[Dataset] Limiting train dataset to {args.max_samples} samples.")
-        train_dataset.data = train_dataset.data.iloc[:args.max_samples]
+            print(f"[Dataset] Limiting train dataset to {max_samples} samples.")
+        train_dataset.data = train_dataset.data.iloc[:max_samples]
         
     val_dataset = SummarizationDataset(dataset_path, split='validation')
+    
+    # Also limit validation dataset if configured
+    max_val_samples = config.get('max_val_samples', None)
+    if max_val_samples is not None:
+        if global_rank == 0:
+            print(f"[Dataset] Limiting val dataset to {max_val_samples} samples.")
+        val_dataset.data = val_dataset.data.iloc[:max_val_samples]
     
     if global_rank == 0:
         print(f"[Dataset] Train: {len(train_dataset)} samples, Val: {len(val_dataset)} samples")
