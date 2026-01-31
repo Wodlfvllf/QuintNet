@@ -32,6 +32,7 @@ patterns.
 
 import torch
 import torch.distributed as dist
+import math
 from abc import ABC, abstractmethod
 from ...core.communication import pipeline_communicate, bidirectional_pipeline_communicate
 
@@ -93,12 +94,15 @@ class AllFwdAllBwdSchedule(PipelineSchedule):
             dtype (torch.dtype): The data type of the tensors.
 
         Returns:
-            Tuple of (loss, accuracy) - only on the last rank of the pipeline.
+            Tuple of (loss, metric) - metric is accuracy for classification,
+            perplexity for CLM. Only on the last rank of the pipeline.
         """
+        import math
+        
         trainer = self.trainer
         logging_loss = 0.0
         total_correct = 0
-        total_samples = 0
+        total_samples = 0  # samples for classification, tokens for CLM
         input_tensors, output_tensors = [], [] # Stores activations for backward pass
         grad_acc_steps = data_loader.grad_acc_steps
         
@@ -121,8 +125,15 @@ class AllFwdAllBwdSchedule(PipelineSchedule):
             
             # Perform forward pass
             if trainer.is_first_stage:
-                # First stage uses image data as input
-                output_tensor = trainer.model.forward(batch["images"].to(device))
+                if trainer.task_type == 'clm':
+                    # CLM: use input_ids with position_ids
+                    input_ids = batch["input_ids"].to(device)
+                    seq_len = input_ids.size(1)
+                    position_ids = torch.arange(seq_len, device=device).unsqueeze(0).expand(input_ids.size(0), -1)
+                    output_tensor = trainer.model.forward(input_ids, position_ids=position_ids)
+                else:
+                    # Classification: use images
+                    output_tensor = trainer.model.forward(batch["images"].to(device))
             else:
                 # Subsequent stages use activations from previous stage
                 output_tensor = trainer.model.forward(input_tensor)
@@ -140,15 +151,28 @@ class AllFwdAllBwdSchedule(PipelineSchedule):
                 shapes=tensor_shapes
             )
             
-            # If this is the last stage, calculate loss and accuracy
+            # If this is the last stage, calculate loss and metrics
             if trainer.is_last_stage:
-                labels = batch["labels"].to(device)
-                loss = trainer.criterion(output_tensor, labels)
-                logging_loss += loss.item()
-                
-                _, predicted = torch.max(output_tensor, 1)
-                total_correct += (predicted == labels).sum().item()
-                total_samples += labels.size(0)
+                if trainer.task_type == 'clm':
+                    # CLM: compute token-level loss
+                    labels = batch["labels"].to(device)
+                    logits = output_tensor
+                    loss = trainer.criterion(
+                        logits.view(-1, trainer.vocab_size),
+                        labels.view(-1)
+                    )
+                    num_tokens = (labels != -100).sum().item()
+                    logging_loss += loss.item() * num_tokens
+                    total_samples += num_tokens
+                else:
+                    # Classification: compute accuracy
+                    labels = batch["labels"].to(device)
+                    loss = trainer.criterion(output_tensor, labels)
+                    logging_loss += loss.item()
+                    
+                    _, predicted = torch.max(output_tensor, 1)
+                    total_correct += (predicted == labels).sum().item()
+                    total_samples += labels.size(0)
                 
                 # The loss scalar is used as input gradient for the backward pass
                 output_tensor = loss
@@ -208,9 +232,16 @@ class AllFwdAllBwdSchedule(PipelineSchedule):
         
         # Return metrics (only calculated/meaningful on the last stage)
         if trainer.is_last_stage:
-            avg_loss = logging_loss / grad_acc_steps
-            avg_accuracy = (total_correct / total_samples) * 100.0 if total_samples > 0 else 0.0
-            return avg_loss, avg_accuracy
+            if trainer.task_type == 'clm':
+                # Return loss and perplexity for CLM
+                avg_loss = logging_loss / total_samples if total_samples > 0 else 0.0
+                perplexity = math.exp(avg_loss) if avg_loss < 20 else float('inf')
+                return avg_loss, perplexity
+            else:
+                # Return loss and accuracy for classification
+                avg_loss = logging_loss / grad_acc_steps
+                avg_accuracy = (total_correct / total_samples) * 100.0 if total_samples > 0 else 0.0
+                return avg_loss, avg_accuracy
         else:
             return None, None
 
@@ -260,30 +291,48 @@ class OneFOneBSchedule(PipelineSchedule):
             batch = next(data_loader)
             
             if trainer.is_first_stage:
-                
-                input_tensor = batch["images"].to(device)
-                
-                output_tensor = trainer.model.forward(input_tensor)
+                if trainer.task_type == 'clm':
+                    # CLM: use input_ids with position_ids
+                    input_ids = batch["input_ids"].to(device)
+                    seq_len = input_ids.size(1)
+                    position_ids = torch.arange(seq_len, device=device).unsqueeze(0).expand(input_ids.size(0), -1)
+                    output_tensor = trainer.model.forward(input_ids, position_ids=position_ids)
+                else:
+                    # Classification: use images
+                    input_tensor = batch["images"].to(device)
+                    output_tensor = trainer.model.forward(input_tensor)
             else:
                 output_tensor = trainer.model.forward(input_tensor)
             
-            # On the last stage, calculate loss and track accuracy
+            # On the last stage, calculate loss and track metrics
             if trainer.is_last_stage:
-                labels = batch["labels"].to(device)
-                loss = trainer.criterion(output_tensor, labels)
-                
                 # nonlocal is used to modify variables in the enclosing scope
                 nonlocal logging_loss, total_correct, total_samples
-                logging_loss += loss.item()
                 
-                _, predicted = torch.max(output_tensor, 1)
-                batch_correct = (predicted == labels).sum().item()
-                batch_total = labels.size(0)
-                total_correct += batch_correct
-                total_samples += batch_total
+                if trainer.task_type == 'clm':
+                    # CLM: compute token-level loss
+                    labels = batch["labels"].to(device)
+                    logits = output_tensor
+                    loss = trainer.criterion(
+                        logits.view(-1, trainer.vocab_size),
+                        labels.view(-1)
+                    )
+                    num_tokens = (labels != -100).sum().item()
+                    logging_loss += loss.item() * num_tokens
+                    total_samples += num_tokens
+                else:
+                    # Classification: compute accuracy
+                    labels = batch["labels"].to(device)
+                    loss = trainer.criterion(output_tensor, labels)
+                    logging_loss += loss.item()
+                    
+                    _, predicted = torch.max(output_tensor, 1)
+                    batch_correct = (predicted == labels).sum().item()
+                    batch_total = labels.size(0)
+                    total_correct += batch_correct
+                    total_samples += batch_total
                 
-                
-                output_tensor = loss # The loss scalar is used as input gradient for the backward pass
+                output_tensor = loss  # The loss scalar is used as input gradient for the backward pass
             
             return output_tensor
         
@@ -444,8 +493,15 @@ class OneFOneBSchedule(PipelineSchedule):
         
         # Return metrics (only calculated/meaningful on the last stage)
         if trainer.is_last_stage:
-            avg_loss = logging_loss / grad_acc_steps
-            avg_accuracy = (total_correct / total_samples) * 100.0 if total_samples > 0 else 0.0
-            return avg_loss, avg_accuracy
+            if trainer.task_type == 'clm':
+                # Return loss and perplexity for CLM
+                avg_loss = logging_loss / total_samples if total_samples > 0 else 0.0
+                perplexity = math.exp(avg_loss) if avg_loss < 20 else float('inf')
+                return avg_loss, perplexity
+            else:
+                # Return loss and accuracy for classification
+                avg_loss = logging_loss / grad_acc_steps
+                avg_accuracy = (total_correct / total_samples) * 100.0 if total_samples > 0 else 0.0
+                return avg_loss, avg_accuracy
         else:
             return None, None
