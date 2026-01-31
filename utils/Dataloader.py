@@ -28,10 +28,12 @@ customizable preprocessing pipelines.
 """
 
 from datasets import Dataset, DatasetDict, load_from_disk
-from torch.utils.data import Dataset as TorchDataset
+from torch.utils.data import Dataset as TorchDataset, DataLoader
+import torch
 import os
 from pathlib import Path
-from typing import Callable, Dict, Any, Optional
+from typing import Callable, Dict, Any, Optional, Union, Tuple, List
+import pandas as pd
 
 class CustomDataset(TorchDataset):
     """
@@ -210,3 +212,147 @@ def mnist_transform(sample: Dict[str, Any]) -> Dict[str, Any]:
         pass
     
     return sample
+
+class SummarizationDataset(TorchDataset):
+    """
+    Dataset for text summarization (e.g., CNN/DailyMail).
+    
+    Loads CSV files with 'article' and 'highlights' columns.
+    Returns raw text - tokenization happens in the collator.
+    
+    Args:
+        dataset_path: Path to directory containing train.csv, validation.csv, test.csv
+        split: Which split to load ('train', 'validation', 'test')
+    """
+    
+    def __init__(self, dataset_path: Union[str, Path], split: str = 'train'):
+        self.dataset_path = Path(dataset_path)
+        self.split = split
+        self.data = self._load_dataset()
+    
+    def _load_dataset(self) -> pd.DataFrame:
+        """Load the appropriate CSV file based on split."""
+        if self.split == 'train':
+            csv_path = self.dataset_path / 'train.csv'
+        elif self.split == 'validation':
+            csv_path = self.dataset_path / 'validation.csv'
+        elif self.split == 'test':
+            csv_path = self.dataset_path / 'test.csv'
+        else:
+            raise ValueError(f"Unknown split: {self.split}. Use 'train', 'validation', or 'test'")
+        
+        if not csv_path.exists():
+            raise FileNotFoundError(f"CSV file not found: {csv_path}")
+        
+        return pd.read_csv(csv_path)
+
+    def __len__(self) -> int:
+        return len(self.data)
+    
+    def __getitem__(self, idx: int) -> Dict[str, str]:
+        if idx >= len(self.data) or idx < 0:
+            raise IndexError(f"Index {idx} out of range for dataset of size {len(self.data)}")
+        
+        row = self.data.iloc[idx]
+        return {
+            'article': str(row['article']),
+            'highlights': str(row['highlights'])
+        }
+
+
+class SummarizationCollator:
+    """
+    Collator for causal language modeling (GPT-2 style).
+    
+    For summarization, we concatenate: article + separator + highlights
+    The model learns to generate highlights given the article.
+    
+    Args:
+        tokenizer: HuggingFace tokenizer (e.g., GPT2Tokenizer)
+        max_length: Maximum sequence length
+        max_target_length: Maximum length for highlights portion
+    """
+    
+    def __init__(self, tokenizer, max_length: int = 512, max_target_length: int = 128):
+        self.tokenizer = tokenizer
+        self.max_length = max_length
+        self.max_target_length = max_target_length
+        
+        # Ensure tokenizer has pad token
+        if self.tokenizer.pad_token is None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
+    
+    def __call__(self, batch: List[Dict[str, str]]) -> Dict[str, torch.Tensor]:
+        """
+        Tokenize and prepare batch for CLM training.
+        
+        Format: <article> TL;DR: <highlights><eos>
+        Labels: -100 for article portion, token ids for highlights portion
+        """
+        input_texts = []
+        for sample in batch:
+            # Create prompt format for summarization
+            text = f"{sample['article']}\n\nTL;DR: {sample['highlights']}{self.tokenizer.eos_token}"
+            input_texts.append(text)
+        
+        # Tokenize all texts
+        encodings = self.tokenizer(
+            input_texts,
+            return_tensors='pt',
+            max_length=self.max_length,
+            truncation=True,
+            padding=True,
+        )
+        
+        input_ids = encodings['input_ids']
+        attention_mask = encodings['attention_mask']
+        
+        # For CLM, labels = input_ids shifted by 1 (handled by loss function)
+        # We mask padding tokens with -100
+        labels = input_ids.clone()
+        labels[attention_mask == 0] = -100  # Ignore padding in loss
+        
+        return {
+            'input_ids': input_ids,
+            'attention_mask': attention_mask,
+            'labels': labels,
+        }
+
+
+class SummarizationDataLoader:
+    """
+    Convenience wrapper for DataLoader with SummarizationDataset.
+    
+    Args:
+        dataset: SummarizationDataset instance
+        batch_size: Batch size
+        collator: SummarizationCollator instance
+        shuffle: Whether to shuffle (default True for training)
+        num_workers: Number of dataloader workers
+    """
+    
+    def __init__(
+        self, 
+        dataset: SummarizationDataset, 
+        batch_size: int, 
+        collator: SummarizationCollator,
+        shuffle: bool = True,
+        num_workers: int = 0,
+    ):
+        self.dataset = dataset
+        self.batch_size = batch_size
+        self.collator = collator
+        self.data_loader = DataLoader(
+            dataset, 
+            batch_size=batch_size, 
+            collate_fn=collator,
+            shuffle=shuffle,
+            num_workers=num_workers,
+            pin_memory=True,
+        )
+
+    def __len__(self) -> int:
+        return len(self.data_loader)
+    
+    def __iter__(self):
+        return iter(self.data_loader)
