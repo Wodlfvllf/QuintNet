@@ -43,7 +43,8 @@ class PipelineParallelWrapper(nn.Module):
                  rank,
                  pp_group,
                  pp_size,
-                 device
+                 device,
+                 stage_module: nn.Module = None,  # NEW: Pre-built stage for distributed loading
                  ):
         """
         Initializes the PipelineParallelWrapper.
@@ -51,7 +52,7 @@ class PipelineParallelWrapper(nn.Module):
         Args:
             model (nn.Module): The complete model to be split into stages.
                 This wrapper is specifically designed for the `Model` class
-                in `QuintNet.utils.model`.
+                in `QuintNet.utils.model`. Can be None if stage_module is provided.
             device_mesh: The device mesh object, used to get rank information.
             rank (int): The rank of the current process within the pipeline
                 parallel group.
@@ -59,6 +60,9 @@ class PipelineParallelWrapper(nn.Module):
                 parallel communication.
             pp_size (int): The total number of stages in the pipeline.
             device (torch.device): The CUDA device for the current process.
+            stage_module (nn.Module): Optional pre-built stage module. If provided,
+                this will be used directly instead of building from model.
+                Used for distributed loading where each GPU builds its own stage.
         """
         super().__init__()
         
@@ -69,19 +73,30 @@ class PipelineParallelWrapper(nn.Module):
         self.is_first_stage = (self.rank == 0)
         self.is_last_stage = (self.rank == self.world_size - 1)
         self.tensor_shapes = None # Shape of the input tensor for this stage
-        
-        # The wrapper assumes the model has a `blocks` attribute which is a list of layers.
-        self.depth = len(model.blocks)
-        
-        # Determine which layers (transformer blocks) belong to this stage.
-        self.layer_distribution = self._distribute_layers(self.depth)
-        
-        # Build the local module for this stage from the full model.
-        self.local_module = self._build_local_module(model)
-        
-        # Move the local module to the correct device.
         self.device = device
-        self.local_module = self.local_module.to(self.device)
+        
+        # ─────────────────────────────────────────────────────────────────
+        # Option A: Use pre-built stage module (distributed loading path)
+        # ─────────────────────────────────────────────────────────────────
+        if stage_module is not None:
+            self.local_module = stage_module.to(self.device)
+            self.depth = None  # Not applicable for pre-built stages
+            self.layer_distribution = None  # Not applicable
+        # ─────────────────────────────────────────────────────────────────
+        # Option B: Build stage from full model (original path)
+        # ─────────────────────────────────────────────────────────────────
+        else:
+            # The wrapper assumes the model has a `blocks` attribute which is a list of layers.
+            self.depth = len(model.blocks)
+            
+            # Determine which layers (transformer blocks) belong to this stage.
+            self.layer_distribution = self._distribute_layers(self.depth)
+            
+            # Build the local module for this stage from the full model.
+            self.local_module = self._build_local_module(model)
+            
+            # Move the local module to the correct device.
+            self.local_module = self.local_module.to(self.device)
 
         # Print a message on the first DP rank of each stage for clarity.
         if self.device_mesh.get_coordinates_tensor_search(dist.get_rank())[0] == 0:
