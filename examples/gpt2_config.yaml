@@ -9,7 +9,7 @@
 
 # Training Configuration
 # ----------------------
-batch_size: 64                # Global batch size (per DP replica) - INCREASED from 8
+batch_size: 256               # Global batch size - INCREASED to use more GPU memory
 learning_rate: 5.0e-5         # AdamW learning rate
 num_epochs: 3                 # Number of training epochs
 grad_acc_steps: 8             # Gradient accumulation steps - INCREASED from 4
