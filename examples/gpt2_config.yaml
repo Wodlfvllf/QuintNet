@@ -1,0 +1,57 @@
+# ============================================================================
+# GPT-2 3D Parallel Training Configuration
+# ============================================================================
+# This config is for distributed training with:
+#   - Data Parallelism (DP): Replicate model across batches
+#   - Tensor Parallelism (TP): Shard layers across GPUs  
+#   - Pipeline Parallelism (PP): Shard layers across stages
+# ============================================================================
+
+# Training Configuration
+# ----------------------
+batch_size: 8                 # Global batch size (per DP replica)
+learning_rate: 5.0e-5         # AdamW learning rate
+num_epochs: 3                 # Number of training epochs
+grad_acc_steps: 4             # Gradient accumulation steps (for micro-batching)
+max_grad_norm: 1.0            # Gradient clipping
+warmup_steps: 100             # LR warmup steps
+num_workers: 2                # DataLoader workers
+
+# Model Configuration (GPT-2 Base)
+# --------------------------------
+model_config:
+  vocab_size: 50257           # GPT-2 vocabulary size
+  n_positions: 1024           # Maximum sequence length
+  n_embd: 768                 # Embedding dimension
+  n_layer: 12                 # Number of transformer layers
+  n_head: 12                  # Number of attention heads
+  n_inner: 3072               # MLP hidden dimension (4 * n_embd)
+  attn_pdrop: 0.1             # Attention dropout
+  embd_pdrop: 0.1             # Embedding dropout
+  resid_pdrop: 0.1            # Residual dropout
+  layer_norm_epsilon: 1.0e-5  # LayerNorm epsilon
+
+# Checkpoint / Model Path
+# -----------------------
+checkpoint_path: "/path/to/gpt2/model.safetensors"
+
+# Parallelism Configuration
+# -------------------------
+device_type: cuda
+mesh_dim: [2, 2, 2]           # [DP=2, TP=2, PP=2] = 8 GPUs total
+mesh_name: ['dp', 'tp', 'pp']
+strategy_name: '3d'
+schedule: '1f1b'              # Pipeline schedule: '1f1b' or 'afab'
+
+# Dataset Configuration
+# ---------------------
+dataset_name: "cnn_dailymail"   # HuggingFace dataset name
+max_seq_length: 512             # Maximum input sequence length
+max_target_length: 128          # Maximum target sequence length (for summarization)
+
+# Logging Configuration
+# ---------------------
+log_interval: 10              # Steps between logging
+eval_interval: 500            # Steps between evaluations
+save_interval: 1000           # Steps between checkpoint saves
+output_dir: "./outputs/gpt2_finetune"
