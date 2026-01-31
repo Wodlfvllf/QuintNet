@@ -383,10 +383,16 @@ class GPT2Trainer:
             if not isinstance(val_loader, PipelineDataLoader):
                 val_loader = PipelineDataLoader(val_loader, grad_acc_steps=1, task_type='clm')
             
+            # Compute validation-specific tensor shapes (uses different batch size)
+            val_batch_size = 128  # Must match val_loader batch_size
+            max_seq_length = self.config.get('max_seq_length', 512)
+            hidden_dim = self.config['model_config']['n_embd']
+            val_tensor_shapes = (val_batch_size, max_seq_length, hidden_dim)
+            
             # Run pipeline evaluation
             val_loss, val_ppl = self.pipeline_trainer.evaluate(
                 val_loader,
-                self.tensor_shapes,
+                val_tensor_shapes,  # Use validation-specific shapes
                 self.device,
                 torch.float32,
             )
