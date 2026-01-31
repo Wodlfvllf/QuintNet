@@ -384,7 +384,7 @@ class GPT2Trainer:
                 val_loader = PipelineDataLoader(val_loader, grad_acc_steps=1, task_type='clm')
             
             # Compute validation-specific tensor shapes (uses different batch size)
-            val_batch_size = 128  # Must match val_loader batch_size
+            val_batch_size = 32  # Must match val_loader batch_size
             max_seq_length = self.config.get('max_seq_length', 512)
             hidden_dim = self.config['model_config']['n_embd']
             val_tensor_shapes = (val_batch_size, max_seq_length, hidden_dim)
@@ -397,19 +397,15 @@ class GPT2Trainer:
                 torch.float32,
             )
             
-            # Broadcast result from last stage to all ranks for consistent reporting
+            # Validation result - only last stage has actual values
             if val_loss is None:
                 val_loss = 0.0
                 val_ppl = 0.0
             
-            # Broadcast from last stage
+            # Use all_reduce MAX to get values from last stage to all ranks
             loss_tensor = torch.tensor([val_loss, val_ppl], device=self.device)
             if dist.is_initialized():
-                # Get last stage rank in pipeline group
-                pp_group = self.pg_manager.get_group('pp')
-                pp_size = dist.get_world_size(pp_group)
-                last_stage_rank = pp_size - 1
-                dist.broadcast(loss_tensor, src=last_stage_rank, group=pp_group)
+                dist.all_reduce(loss_tensor, op=dist.ReduceOp.MAX)
             
             return loss_tensor[0].item(), loss_tensor[1].item()
         
