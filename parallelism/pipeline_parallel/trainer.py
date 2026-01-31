@@ -148,11 +148,15 @@ class PipelineTrainer:
         total_samples = 0  # For classification: number of samples; for CLM: number of tokens
         num_batches = 0
         
-        # Progress bar for validation (only show on first stage)
+        # Only show progress on global rank 0
+        import torch.distributed as dist
+        global_rank = dist.get_rank() if dist.is_initialized() else 0
+        
+        # Progress bar for validation (only show on global rank 0)
         pbar = tqdm(
             val_loader,
             desc="Validation [Pipeline]",
-            disable=(not self.is_first_stage),
+            disable=(global_rank != 0),
             ncols=100,
         )
         
