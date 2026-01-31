@@ -16,6 +16,8 @@ grad_acc_steps: 4             # Gradient accumulation steps (for micro-batching)
 max_grad_norm: 1.0            # Gradient clipping
 warmup_steps: 100             # LR warmup steps
 num_workers: 2                # DataLoader workers
+max_samples: 2000             # Training dataset limit
+max_val_samples: 200          # Validation dataset limit
 
 # Model Configuration (GPT-2 Base)
 # --------------------------------
