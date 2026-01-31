@@ -49,7 +49,13 @@ from .tp_pp_strategy import TensorPipelineParallelStrategy
 from .hybrid_3d_strategy import Hybrid3DStrategy
 from ..core import ProcessGroupManager
 
-def get_strategy(strategy_name: str, pg_manager: ProcessGroupManager, config: Dict[str, Any]) -> BaseStrategy:
+def get_strategy(
+    strategy_name: str, 
+    pg_manager: ProcessGroupManager, 
+    config: Dict[str, Any],
+    checkpoint_path: str = None,
+    is_staged: bool = False,
+) -> BaseStrategy:
     """
     Factory function to get a parallelism strategy instance.
 
@@ -63,6 +69,8 @@ def get_strategy(strategy_name: str, pg_manager: ProcessGroupManager, config: Di
         pg_manager (ProcessGroupManager): The process group manager, which
             provides information about the distributed setup.
         config (Dict[str, Any]): The global configuration dictionary.
+        checkpoint_path (str): Optional path to safetensors checkpoint for staged loading.
+        is_staged (bool): If True, use distributed checkpoint loading (only for "3d" strategy).
 
     Returns:
         BaseStrategy: An initialized instance of the requested parallelism strategy.
@@ -82,7 +90,16 @@ def get_strategy(strategy_name: str, pg_manager: ProcessGroupManager, config: Di
     strategy_class = strategies.get(strategy_name.lower())
     
     if strategy_class:
-        # Return an instance of the chosen strategy class
-        return strategy_class(pg_manager, config)
+        # Hybrid3DStrategy accepts additional params for staged loading
+        if strategy_name.lower() == "3d":
+            return strategy_class(
+                pg_manager, 
+                config, 
+                checkpoint_path=checkpoint_path, 
+                is_staged=is_staged
+            )
+        else:
+            # Return an instance of the chosen strategy class
+            return strategy_class(pg_manager, config)
     else:
         raise ValueError(f"Unknown strategy: '{strategy_name}'. Available strategies are: {list(strategies.keys())}")
