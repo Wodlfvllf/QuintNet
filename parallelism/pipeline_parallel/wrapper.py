@@ -195,7 +195,7 @@ class PipelineParallelWrapper(nn.Module):
         """
         return (batch_size, *self.tensor_shapes)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, **kwargs) -> torch.Tensor:
         """
         Performs the forward pass for only the layers in this pipeline stage.
 
@@ -203,11 +203,12 @@ class PipelineParallelWrapper(nn.Module):
             x (torch.Tensor): The input tensor. For the first stage, this is the
                 batch of images. For subsequent stages, it is the activation
                 tensor from the previous stage.
+            **kwargs: Additional arguments to pass to the local module (e.g. position_ids).
 
         Returns:
             torch.Tensor: The output activation tensor to be passed to the next stage.
         """
-        res = self.local_module(x)
+        res = self.local_module(x, **kwargs)
         return res
     
     def backward(self, input_tensor: torch.Tensor, output_tensor: torch.Tensor, output_tensor_grad: torch.Tensor) -> torch.Tensor:
