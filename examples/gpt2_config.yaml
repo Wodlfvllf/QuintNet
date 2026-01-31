@@ -56,4 +56,4 @@ max_target_length: 128          # Maximum target sequence length (for summarizat
 log_interval: 10              # Steps between logging
 eval_interval: 500            # Steps between evaluations
 save_interval: 1000           # Steps between checkpoint saves
-output_dir: "./outputs/gpt2_finetune"
+output_dir: "/mnt/checkpoints"  # Save to Modal volume for persistence
