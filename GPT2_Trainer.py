@@ -384,7 +384,7 @@ class GPT2Trainer:
                 val_loader = PipelineDataLoader(val_loader, grad_acc_steps=1, task_type='clm')
             
             # Compute validation-specific tensor shapes (uses different batch size)
-            val_batch_size = 32  # Must match val_loader batch_size
+            val_batch_size = 128  # Must match val_loader batch_size
             max_seq_length = self.config.get('max_seq_length', 512)
             hidden_dim = self.config['model_config']['n_embd']
             val_tensor_shapes = (val_batch_size, max_seq_length, hidden_dim)
