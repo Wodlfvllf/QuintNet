@@ -47,6 +47,8 @@ def main():
                         help='Path to dataset directory with train.csv, validation.csv.')
     parser.add_argument('--tokenizer', type=str, default='gpt2',
                         help='HuggingFace tokenizer name/path (default: gpt2)')
+    parser.add_argument('--max_samples', type=int, default=None,
+                        help='Limit dataset size for testing (e.g. 200).')
     
     args = parser.parse_args()
     
@@ -112,6 +114,11 @@ def main():
     dataset_path = Path(args.dataset)
     
     train_dataset = SummarizationDataset(dataset_path, split='train')
+    if args.max_samples is not None:
+        if global_rank == 0:
+            print(f"[Dataset] Limiting train dataset to {args.max_samples} samples.")
+        train_dataset.data = train_dataset.data.iloc[:args.max_samples]
+        
     val_dataset = SummarizationDataset(dataset_path, split='validation')
     
     if global_rank == 0:
