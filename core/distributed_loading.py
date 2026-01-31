@@ -200,9 +200,17 @@ from .process_groups import ProcessGroupManager, init_process_groups
 from .mesh import MeshGenerator
 from safetensors import safe_open
 
-def load_gpt2_distributed(checkpoint_path, pg_manager, config, device):
+def load_gpt2_distributed(checkpoint_path, pg_manager, config, device, model_config=None):
     """
     Load GPT-2 checkpoint in a distributed manner across the 3D mesh.
+    
+    Args:
+        checkpoint_path: Path to safetensors checkpoint
+        pg_manager: ProcessGroupManager for mesh coordinates
+        config: Training config dict (for mesh_dim, mesh_name)
+        device: Device for this GPU
+        model_config: GPT2Config object with model parameters (n_layer, n_embd, etc.)
+                     If None, uses default GPT-2 base settings.
     """
 
     # ═══════════════════════════════════════════════════════════════════
@@ -224,10 +232,20 @@ def load_gpt2_distributed(checkpoint_path, pg_manager, config, device):
     # STEP 2: Calculate which layers this GPU owns (Pipeline Parallelism)
     # ═══════════════════════════════════════════════════════════════════
 
-    num_layers = 12
-    layers_per_stage = num_layers//pp_size
+    # Get model dimensions from model_config (or use defaults)
+    if model_config is not None:
+        num_layers = model_config.n_layer
+        embed_dim = model_config.n_embd
+        hidden_dim = model_config.n_inner or 4 * embed_dim
+    else:
+        # Default GPT-2 base dimensions
+        num_layers = 12
+        embed_dim = 768
+        hidden_dim = 3072
+    
+    layers_per_stage = num_layers // pp_size
 
-    my_layer_start = pp_rank*layers_per_stage
+    my_layer_start = pp_rank * layers_per_stage
     my_layer_end = my_layer_start + layers_per_stage
     my_layers = list(range(my_layer_start, my_layer_end))
 
@@ -272,13 +290,13 @@ def load_gpt2_distributed(checkpoint_path, pg_manager, config, device):
 
             # ─────────────────────────────────────────────────────────
             # Attention c_attn: COLUMN PARALLEL (shard output dim)
-            #   Full: [768, 2304] → Each TP rank: [768, 1152]
+            #   Full: [embed_dim, 3*embed_dim] → Each TP rank: [embed_dim, 3*embed_dim/tp_size]
             # ─────────────────────────────────────────────────────────
             c_attn_w_full = f.get_slice(f"{prefix}.attn.c_attn.weight")
             c_attn_b_full = f.get_slice(f"{prefix}.attn.c_attn.bias")
             
-            out_dim = 2304
-            cols_per_rank = out_dim // tp_size  # 2304 / 2 = 1152
+            c_attn_out_dim = 3 * embed_dim  # 3 * 768 = 2304 for GPT-2 base
+            cols_per_rank = c_attn_out_dim // tp_size
             col_start = tp_rank * cols_per_rank
             col_end = col_start + cols_per_rank
             
@@ -289,12 +307,11 @@ def load_gpt2_distributed(checkpoint_path, pg_manager, config, device):
 
             # ─────────────────────────────────────────────────────────
             # Attention c_proj: ROW PARALLEL (shard input dim)
-            #   Full: [768, 768] → Each TP rank: [384, 768]
+            #   Full: [embed_dim, embed_dim] → Each TP rank: [embed_dim/tp_size, embed_dim]
             # ─────────────────────────────────────────────────────────
             c_proj_w_full = f.get_slice(f"{prefix}.attn.c_proj.weight")
             
-            in_dim = 768
-            rows_per_rank = in_dim // tp_size  # 768 / 2 = 384
+            rows_per_rank = embed_dim // tp_size
             row_start = tp_rank * rows_per_rank
             row_end = row_start + rows_per_rank
             
@@ -306,13 +323,12 @@ def load_gpt2_distributed(checkpoint_path, pg_manager, config, device):
 
             # ─────────────────────────────────────────────────────────
             # MLP c_fc: COLUMN PARALLEL (shard output dim)
-            #   Full: [768, 3072] → Each TP rank: [768, 1536]
+            #   Full: [embed_dim, hidden_dim] → Each TP rank: [embed_dim, hidden_dim/tp_size]
             # ─────────────────────────────────────────────────────────
             c_fc_w_full = f.get_slice(f"{prefix}.mlp.c_fc.weight")
             c_fc_b_full = f.get_slice(f"{prefix}.mlp.c_fc.bias")
             
-            out_dim = 3072
-            cols_per_rank = out_dim // tp_size  # 3072 / 2 = 1536
+            cols_per_rank = hidden_dim // tp_size
             col_start = tp_rank * cols_per_rank
             col_end = col_start + cols_per_rank
             
@@ -321,12 +337,11 @@ def load_gpt2_distributed(checkpoint_path, pg_manager, config, device):
 
             # ─────────────────────────────────────────────────────────
             # MLP c_proj: ROW PARALLEL (shard input dim)
-            #   Full: [3072, 768] → Each TP rank: [1536, 768]
+            #   Full: [hidden_dim, embed_dim] → Each TP rank: [hidden_dim/tp_size, embed_dim]
             # ─────────────────────────────────────────────────────────
             c_proj_w_full = f.get_slice(f"{prefix}.mlp.c_proj.weight")
             
-            in_dim = 3072
-            rows_per_rank = in_dim // tp_size  # 3072 / 2 = 1536
+            rows_per_rank = hidden_dim // tp_size
             row_start = tp_rank * rows_per_rank
             row_end = row_start + rows_per_rank
             
@@ -343,6 +358,13 @@ def load_gpt2_distributed(checkpoint_path, pg_manager, config, device):
         if pp_rank == pp_size - 1:  # Last stage
             state_dict["ln_f.weight"] = f.get_tensor("ln_f.weight")
             state_dict["ln_f.bias"] = f.get_tensor("ln_f.bias")
+            
+            # ─────────────────────────────────────────────────────────────
+            # Weight Tying: Load wte.weight for lm_head (copy of embedding)
+            # GPT-2 uses weight tying: lm_head.weight = wte.weight.T
+            # Since embedding is on first stage, we need wte on last stage too
+            # ─────────────────────────────────────────────────────────────
+            state_dict['wte.weight'] = f.get_tensor('wte.weight')  # [50257, 768]
     
     return state_dict
 
