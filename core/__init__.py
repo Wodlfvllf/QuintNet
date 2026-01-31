@@ -21,6 +21,7 @@ from .communication import (
     pipeline_communicate,
     bidirectional_pipeline_communicate,
 )
+from .distributed_loading import load_gpt2_distributed
 
 __all__ = [
     'MeshGenerator',
@@ -36,4 +37,5 @@ __all__ = [
     'Recv',
     'pipeline_communicate',
     'bidirectional_pipeline_communicate',
+    'load_gpt2_distributed'    
 ]
