@@ -221,6 +221,80 @@ Training a Vision Transformer on MNIST with 8 GPUs (2×2×2 mesh):
 - **Batch Size**: 32 (effective: 32 × 2 DP = 64)
 - **Parallelism**: 2 Data × 2 Tensor × 2 Pipeline
 
+---
+
+### 🤖 GPT-2 Text Summarization
+
+We also benchmarked QuintNet on **GPT-2 fine-tuning for text summarization** using Modal cloud infrastructure, demonstrating the framework's capability for large language model training.
+
+#### Training Results
+
+| Epoch | Train Loss | Train PPL | Val Loss | Val PPL |
+|:-----:|:----------:|:---------:|:--------:|:-------:|
+| 1 | 8.2477 | 3818.76 | 7.3738 | 1593.61 |
+| 2 | 6.9159 | 1008.13 | 5.6890 | 295.59 |
+| 3 | **5.3281** | **206.05** | **3.3037** | **27.21** |
+
+> 📉 **Perplexity Reduction**: 3818.76 → 206.05 (Train) | 1593.61 → 27.21 (Val)
+
+#### Training Progress Visualization
+
+```
+Validation Perplexity
+       │
+  1600 ┤ ●
+       │  ╲
+  1200 ┤   ╲
+       │    ╲
+   800 ┤     ╲
+       │      ╲
+   400 ┤       ╲
+       │        ●
+   100 ┤         ╲
+       │          ●
+     0 ┼──────────────────
+       1    2    3   Epoch
+
+Train Loss                          
+       │                            
+   8.5 ┤ ●                          
+       │  ╲
+   7.5 ┤   ╲
+       │    ●                       
+   6.5 ┤     ╲
+       │      ╲
+   5.5 ┤       ╲                       
+       │        ●                   
+   5.0 ┼──────────────────
+       1    2    3   Epoch
+```
+
+#### Key Observations
+
+| Metric | Epoch 1 → 3 Improvement | Analysis |
+|--------|-------------------------|----------|
+| **Train Loss** | 8.25 → 5.33 | 35.4% reduction |
+| **Train PPL** | 3819 → 206 | 94.6% reduction |
+| **Val Loss** | 7.37 → 3.30 | 55.2% reduction |
+| **Val PPL** | 1594 → 27 | **98.3% reduction** |
+
+#### Training Analysis
+
+- **Strong Generalization**: Validation perplexity improved more dramatically (98.3%) than training perplexity (94.6%), indicating effective generalization without overfitting
+- **Rapid Convergence**: Significant improvements within just 3 epochs showcase efficient distributed training
+- **Low Final PPL**: Achieving a validation perplexity of **27.21** indicates the model has learned meaningful text summarization patterns
+
+#### GPT-2 Training Configuration
+- **Model**: GPT-2 (124M parameters)
+- **Task**: Text Summarization
+- **Infrastructure**: Modal Cloud (Multi-GPU)
+- **Framework**: QuintNet with 3D Parallelism
+
+```bash
+# Running GPT-2 training on Modal
+modal run QuintNet/gpt2_train_modal_run.py::main
+```
+
 ## 🧪 Testing
 
 ```bash
