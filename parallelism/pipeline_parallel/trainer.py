@@ -152,16 +152,32 @@ class PipelineTrainer:
         import torch.distributed as dist
         global_rank = dist.get_rank() if dist.is_initialized() else 0
         
+        # Get number of batches to process
+        num_val_batches = len(val_loader)
+        
         # Progress bar for validation (only show on global rank 0)
         pbar = tqdm(
-            val_loader,
+            range(num_val_batches),
             desc="Validation [Pipeline]",
             disable=(global_rank != 0),
             ncols=100,
         )
         
+        # Create iterator for first stage
+        if self.is_first_stage:
+            data_iter = iter(val_loader)
+        
         with torch.no_grad():
-            for i, batch in enumerate(pbar):
+            for i in pbar:
+                # First stage: get batch from dataloader
+                if self.is_first_stage:
+                    try:
+                        batch = next(data_iter)
+                    except StopIteration:
+                        break
+                else:
+                    batch = None
+                
                 # Receive activation from previous stage (None for first stage)
                 input_tensor = pipeline_communicate(
                     operation='recv_forward',
@@ -206,7 +222,17 @@ class PipelineTrainer:
                 if self.is_last_stage:
                     if self.task_type == 'clm':
                         # CLM: compute token-level loss and perplexity
-                        labels = batch["labels"].to(device)
+                        # Last stage needs labels from first stage - use the batch from its own dataloader
+                        # Since all DP ranks have same samples (distributed sampler), this should work
+                        if not hasattr(self, '_val_data_iter'):
+                            self._val_data_iter = iter(val_loader)
+                        try:
+                            last_stage_batch = next(self._val_data_iter)
+                        except StopIteration:
+                            self._val_data_iter = iter(val_loader)
+                            last_stage_batch = next(self._val_data_iter)
+                        
+                        labels = last_stage_batch["labels"].to(device)
                         logits = output_tensor
                         loss = self.criterion(
                             logits.view(-1, self.vocab_size),
@@ -217,7 +243,15 @@ class PipelineTrainer:
                         total_samples += num_tokens
                     else:
                         # Classification: compute accuracy
-                        labels = batch["label"].to(device)
+                        if not hasattr(self, '_val_data_iter'):
+                            self._val_data_iter = iter(val_loader)
+                        try:
+                            last_stage_batch = next(self._val_data_iter)
+                        except StopIteration:
+                            self._val_data_iter = iter(val_loader)
+                            last_stage_batch = next(self._val_data_iter)
+                        
+                        labels = last_stage_batch["label"].to(device)
                         loss = self.criterion(output_tensor, labels)
                         
                         total_loss += loss.item() * labels.size(0)
@@ -226,6 +260,10 @@ class PipelineTrainer:
                         _, predicted = torch.max(output_tensor, 1)
                         total_correct += (predicted == labels).sum().item()
                         total_samples += labels.size(0)
+        
+        # Clean up iterator
+        if hasattr(self, '_val_data_iter'):
+            delattr(self, '_val_data_iter')
         
         # Return metrics only from the last stage
         if self.is_last_stage and total_samples > 0:
