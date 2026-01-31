@@ -301,7 +301,7 @@ class SummarizationCollator:
             return_tensors='pt',
             max_length=self.max_length,
             truncation=True,
-            padding=True,
+            padding='max_length',
         )
         
         input_ids = encodings['input_ids']
