@@ -588,6 +588,400 @@ def test_weight_shapes():
     return 0 if all_passed else 1
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# MERGE AND TEST ON SINGLE GPU - Runs after training
+# ═══════════════════════════════════════════════════════════════════════════
+
+@app.function(
+    image=image,
+    gpu="A100",  # Single A100 GPU for testing
+    volumes={
+        "/mnt/model": model_volume,
+        "/mnt/dataset": dataset_volume,
+        "/mnt/checkpoints": checkpoint_volume,
+    },
+    timeout=3600,  # 1 hour timeout
+)
+def merge_and_test_model(
+    max_samples: int = 250,
+    max_gen_samples: int = 10,
+    batch_size: int = 4,
+):
+    """
+    Merge 3D parallel checkpoints and test on single GPU.
+    
+    This function:
+    1. Loads all checkpoint shards from /mnt/checkpoints
+    2. Merges TP and PP shards into a single model
+    3. Tests on 200-300 validation samples
+    4. Computes loss, perplexity, and generates sample outputs
+    
+    Usage:
+        modal run QuintNet/gpt2_train_modal_run.py::merge_and_test_model
+    """
+    import sys
+    import math
+    import torch
+    import torch.nn as nn
+    from pathlib import Path
+    from tqdm import tqdm
+    from collections import defaultdict
+    import pandas as pd
+    
+    sys.path.insert(0, "/workspace")
+    
+    print("=" * 80)
+    print("🔄 MERGE CHECKPOINTS & TEST ON SINGLE GPU")
+    print("=" * 80)
+    
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if torch.cuda.is_available():
+        print(f"🖥️  Using GPU: {torch.cuda.get_device_name(0)}")
+    
+    # ─────────────────────────────────────────────────────────────────────────
+    # STEP 1: Load all checkpoint shards
+    # ─────────────────────────────────────────────────────────────────────────
+    print("\n📂 STEP 1: Loading checkpoint shards...")
+    checkpoint_dir = "/mnt/checkpoints"
+    shards = defaultdict(dict)
+    
+    for filename in os.listdir(checkpoint_dir):
+        if filename.startswith("final_model") and filename.endswith(".pt"):
+            # Parse: final_model_pp{pp}_tp{tp}.pt
+            parts = filename.replace(".pt", "").split("_")
+            pp_rank = None
+            tp_rank = None
+            
+            for part in parts:
+                if part.startswith("pp"):
+                    pp_rank = int(part[2:])
+                elif part.startswith("tp"):
+                    tp_rank = int(part[2:])
+            
+            if pp_rank is not None and tp_rank is not None:
+                path = os.path.join(checkpoint_dir, filename)
+                checkpoint = torch.load(path, map_location="cpu")
+                shards[pp_rank][tp_rank] = checkpoint
+                size_mb = os.path.getsize(path) / 1e6
+                print(f"   ✓ Loaded {filename} (PP={pp_rank}, TP={tp_rank}, {size_mb:.1f} MB)")
+    
+    if not shards:
+        print("❌ No checkpoint shards found!")
+        # Try loading single checkpoint directly
+        single_ckpt = os.path.join(checkpoint_dir, "final_model_pp0_tp0.pt")
+        if os.path.exists(single_ckpt):
+            print(f"   Found single checkpoint: {single_ckpt}")
+            checkpoint = torch.load(single_ckpt, map_location="cpu")
+            merged_state = checkpoint.get("model_state_dict", checkpoint)
+        else:
+            return 1
+    else:
+        pp_size = len(shards)
+        tp_size = len(shards[0]) if shards else 1
+        print(f"\n   📊 Found: PP={pp_size}, TP={tp_size}")
+        
+        # ─────────────────────────────────────────────────────────────────────
+        # STEP 2: Merge TP shards for each PP stage
+        # ─────────────────────────────────────────────────────────────────────
+        print("\n🔗 STEP 2: Merging TP shards...")
+        
+        pp_stages = {}
+        for pp_rank in sorted(shards.keys()):
+            tp_shards = shards[pp_rank]
+            
+            if len(tp_shards) == 1:
+                # No TP, just use the single shard
+                merged_stage = tp_shards[0].get("model_state_dict", tp_shards[0])
+            else:
+                # Merge TP shards
+                tp_size = len(tp_shards)
+                merged_stage = {}
+                
+                # Get state dicts for each rank
+                rank_states = [
+                    tp_shards[r].get("model_state_dict", tp_shards[r])
+                    for r in range(tp_size)
+                ]
+                
+                # Collect all unique keys across all ranks
+                all_keys = set()
+                for state in rank_states:
+                    all_keys.update(state.keys())
+                
+                for key in all_keys:
+                    # Check which ranks have this key
+                    available_tensors = []
+                    available_ranks = []
+                    for r in range(tp_size):
+                        if key in rank_states[r]:
+                            available_tensors.append(rank_states[r][key])
+                            available_ranks.append(r)
+                    
+                    if len(available_tensors) == 0:
+                        continue
+                    
+                    if len(available_tensors) == 1:
+                        # Key only exists in one rank (e.g., row-parallel bias)
+                        merged_stage[key] = available_tensors[0]
+                    else:
+                        # Key exists in multiple ranks - merge based on layer type
+                        if "c_attn.weight" in key or "c_fc.weight" in key:
+                            # Column parallel weights: concat along dim 0 (out_features)
+                            merged_stage[key] = torch.cat(available_tensors, dim=0)
+                        elif "c_attn.bias" in key or "c_fc.bias" in key:
+                            # Column parallel biases: concat along dim 0
+                            merged_stage[key] = torch.cat(available_tensors, dim=0)
+                        elif "c_proj.weight" in key:
+                            # Row parallel weights: concat along dim 1 (in_features)
+                            merged_stage[key] = torch.cat(available_tensors, dim=1)
+                        elif "c_proj.bias" in key:
+                            # Row parallel bias: use rank 0's copy (should be identical after allreduce)
+                            merged_stage[key] = available_tensors[0]
+                        else:
+                            # Non-sharded layers (LayerNorm, embeddings): use rank 0
+                            merged_stage[key] = available_tensors[0]
+            
+            pp_stages[pp_rank] = merged_stage
+            print(f"   ✓ Merged PP stage {pp_rank}")
+        
+        # ─────────────────────────────────────────────────────────────────────
+        # STEP 3: Merge PP stages
+        # ─────────────────────────────────────────────────────────────────────
+        print("\n🔗 STEP 3: Merging PP stages...")
+        
+        if pp_size == 1:
+            merged_state = pp_stages[0]
+        else:
+            # Combine all PP stages
+            merged_state = {}
+            for pp_rank, stage_state in sorted(pp_stages.items()):
+                for key, value in stage_state.items():
+                    merged_state[key] = value
+        
+        print(f"   ✓ Combined {pp_size} pipeline stages")
+    
+    # ─────────────────────────────────────────────────────────────────────────
+    # STEP 4: Load into HuggingFace GPT2LMHeadModel
+    # ─────────────────────────────────────────────────────────────────────────
+    print("\n🤖 STEP 4: Loading merged model...")
+    from transformers import GPT2LMHeadModel, GPT2Config, GPT2Tokenizer
+    
+    config = GPT2Config(
+        vocab_size=50257,
+        n_positions=1024,
+        n_embd=768,
+        n_layer=12,
+        n_head=12,
+        n_inner=3072,
+    )
+    
+    model = GPT2LMHeadModel(config)
+    
+    # Try to load state dict (handle different formats)
+    try:
+        missing, unexpected = model.load_state_dict(merged_state, strict=False)
+        print(f"   Missing keys: {len(missing)}")
+        print(f"   Unexpected keys: {len(unexpected)}")
+        if len(unexpected) < 10:
+            for k in unexpected[:5]:
+                print(f"      - {k}")
+    except Exception as e:
+        print(f"   ⚠️  Direct load failed: {e}")
+        print("   Trying with 'transformer.' prefix...")
+        
+        # Add transformer prefix if needed
+        prefixed_state = {}
+        for k, v in merged_state.items():
+            if not k.startswith("transformer.") and not k.startswith("lm_head"):
+                prefixed_state[f"transformer.{k}"] = v
+            else:
+                prefixed_state[k] = v
+        
+        # Handle weight tying
+        if "transformer.wte.weight" in prefixed_state:
+            prefixed_state["lm_head.weight"] = prefixed_state["transformer.wte.weight"]
+        
+        missing, unexpected = model.load_state_dict(prefixed_state, strict=False)
+        print(f"   Missing keys: {len(missing)}")
+        print(f"   Unexpected keys: {len(unexpected)}")
+    
+    model = model.to(device)
+    model.eval()
+    
+    total_params = sum(p.numel() for p in model.parameters())
+    print(f"   ✅ Model loaded: {total_params:,} parameters")
+    
+    # Load tokenizer
+    tokenizer = GPT2Tokenizer.from_pretrained("gpt2")
+    tokenizer.pad_token = tokenizer.eos_token
+    print(f"   ✅ Tokenizer loaded (vocab_size={tokenizer.vocab_size})")
+    
+    # ─────────────────────────────────────────────────────────────────────────
+    # STEP 5: Load test dataset
+    # ─────────────────────────────────────────────────────────────────────────
+    print("\n📚 STEP 5: Loading validation dataset...")
+    dataset_path = "/mnt/dataset/cnn_dailymail/validation.csv"
+    
+    if not os.path.exists(dataset_path):
+        print(f"   ❌ Dataset not found at {dataset_path}")
+        return 1
+    
+    df = pd.read_csv(dataset_path)
+    print(f"   ✅ Loaded {len(df)} validation samples")
+    
+    # ─────────────────────────────────────────────────────────────────────────
+    # STEP 6: Compute Loss and Perplexity
+    # ─────────────────────────────────────────────────────────────────────────
+    print(f"\n📊 STEP 6: Computing loss on {max_samples} samples...")
+    
+    criterion = nn.CrossEntropyLoss(ignore_index=-100)
+    total_loss = 0.0
+    total_tokens = 0
+    num_samples = min(max_samples, len(df))
+    
+    with torch.no_grad():
+        for i in tqdm(range(0, num_samples, batch_size), desc="Computing loss"):
+            batch_end = min(i + batch_size, num_samples)
+            batch_texts = []
+            
+            for j in range(i, batch_end):
+                article = str(df.iloc[j]["article"])[:1500]  # Truncate long articles
+                highlights = str(df.iloc[j]["highlights"])
+                text = f"{article}\n\nTL;DR: {highlights}"
+                batch_texts.append(text)
+            
+            # Tokenize
+            encodings = tokenizer(
+                batch_texts,
+                return_tensors="pt",
+                max_length=512,
+                truncation=True,
+                padding="max_length",
+            )
+            
+            input_ids = encodings["input_ids"].to(device)
+            attention_mask = encodings["attention_mask"].to(device)
+            
+            # Create labels
+            labels = input_ids.clone()
+            labels[attention_mask == 0] = -100
+            
+            # Forward pass
+            outputs = model(input_ids, attention_mask=attention_mask)
+            logits = outputs.logits
+            
+            # Compute loss (shift for CLM)
+            shift_logits = logits[:, :-1, :].contiguous()
+            shift_labels = labels[:, 1:].contiguous()
+            
+            loss = criterion(
+                shift_logits.view(-1, logits.size(-1)),
+                shift_labels.view(-1)
+            )
+            
+            num_tokens = (shift_labels != -100).sum().item()
+            total_loss += loss.item() * num_tokens
+            total_tokens += num_tokens
+    
+    avg_loss = total_loss / total_tokens if total_tokens > 0 else 0
+    perplexity = math.exp(avg_loss) if avg_loss < 20 else float("inf")
+    
+    print("\n" + "=" * 60)
+    print("📈 LOSS METRICS")
+    print("=" * 60)
+    print(f"   Samples Tested:  {num_samples}")
+    print(f"   Average Loss:    {avg_loss:.4f}")
+    print(f"   Perplexity:      {perplexity:.2f}")
+    print("=" * 60)
+    
+    # ─────────────────────────────────────────────────────────────────────────
+    # STEP 7: Generate Sample Outputs
+    # ─────────────────────────────────────────────────────────────────────────
+    print(f"\n📝 STEP 7: Generating {max_gen_samples} sample summaries...")
+    
+    sample_outputs = []
+    
+    with torch.no_grad():
+        for i in range(min(max_gen_samples, len(df))):
+            article = str(df.iloc[i]["article"])[:800]  # Use first 800 chars
+            reference = str(df.iloc[i]["highlights"])
+            
+            prompt = f"{article}\n\nTL;DR:"
+            
+            inputs = tokenizer(
+                prompt,
+                return_tensors="pt",
+                max_length=400,
+                truncation=True,
+            )
+            input_ids = inputs["input_ids"].to(device)
+            attention_mask = inputs["attention_mask"].to(device)
+            
+            # Generate
+            outputs = model.generate(
+                input_ids,
+                attention_mask=attention_mask,
+                max_new_tokens=100,
+                do_sample=False,
+                pad_token_id=tokenizer.eos_token_id,
+                num_beams=1,
+            )
+            
+            # Decode
+            generated_ids = outputs[0, input_ids.size(1):]
+            generated_text = tokenizer.decode(generated_ids, skip_special_tokens=True)
+            
+            sample_outputs.append({
+                "reference": reference[:300],
+                "generated": generated_text[:300],
+            })
+    
+    # Print sample outputs
+    print("\n" + "=" * 80)
+    print("📝 SAMPLE GENERATED SUMMARIES")
+    print("=" * 80)
+    
+    for i, sample in enumerate(sample_outputs):
+        print(f"\n{'─' * 80}")
+        print(f"📌 SAMPLE {i + 1}")
+        print(f"{'─' * 80}")
+        print(f"🎯 REFERENCE:")
+        print(f"   {sample['reference']}")
+        print(f"\n🤖 GENERATED:")
+        print(f"   {sample['generated']}")
+    
+    # ─────────────────────────────────────────────────────────────────────────
+    # FINAL SUMMARY
+    # ─────────────────────────────────────────────────────────────────────────
+    print("\n" + "=" * 80)
+    print("🏁 FINAL TEST SUMMARY")
+    print("=" * 80)
+    print(f"   ✅ Model:         GPT-2 (124M parameters)")
+    print(f"   ✅ Samples:       {num_samples}")
+    print(f"   ✅ Loss:          {avg_loss:.4f}")
+    print(f"   ✅ Perplexity:    {perplexity:.2f}")
+    print(f"   ✅ Generations:   {len(sample_outputs)} samples")
+    print("=" * 80)
+    
+    # Save merged model for future use
+    merged_model_path = "/mnt/checkpoints/merged_gpt2.pt"
+    torch.save({
+        "model_state_dict": model.state_dict(),
+        "config": config.to_dict(),
+        "test_results": {
+            "loss": avg_loss,
+            "perplexity": perplexity,
+            "samples_tested": num_samples,
+        }
+    }, merged_model_path)
+    print(f"\n💾 Saved merged model to: {merged_model_path}")
+    
+    # Commit the checkpoint volume
+    checkpoint_volume.commit()
+    
+    return 0
+
+
 if __name__ == "__main__":
     with app.run():
         main()
