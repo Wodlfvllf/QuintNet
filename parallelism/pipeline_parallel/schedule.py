@@ -290,6 +290,15 @@ class OneFOneBSchedule(PipelineSchedule):
             """Helper function for performing a micro-batch forward pass."""
             batch = next(data_loader)
             
+            # DEBUG: Print rank roles and shapes
+            # if i == 0:  # Print only on first micro-batch
+            # try:
+            #     labels_shape = batch["labels"].shape if "labels" in batch else "None"
+            #     input_shape = batch["input_ids"].shape if "input_ids" in batch else "None"
+            #     print(f"[Rank {dist.get_rank()}] Step {i}: First={trainer.is_first_stage}, Last={trainer.is_last_stage}, Input={input_shape}, Labels={labels_shape}", flush=True)
+            # except:
+            #     pass
+            
             if trainer.is_first_stage:
                 if trainer.task_type == 'clm':
                     # CLM: use input_ids with position_ids
