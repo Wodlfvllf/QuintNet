@@ -195,6 +195,158 @@ PP Groups (pipeline parallel - P2P Send/Recv):
 
 import torch
 import torch.nn as nn
+import torch.distributed as dist
 from .process_groups import ProcessGroupManager, init_process_groups
 from .mesh import MeshGenerator
+from safetensors import safe_open
 
+def load_gpt2_distributed(checkpoint_path, pg_manager, config, device):
+    """
+    Load GPT-2 checkpoint in a distributed manner across the 3D mesh.
+    """
+
+    # ═══════════════════════════════════════════════════════════════════
+    # STEP 1: Determine this GPU's role in the mesh
+    # ═══════════════════════════════════════════════════════════════════
+    
+    global_rank = dist.get_rank()
+    coords = pg_manager.get_coordinates_tensor_search(global_rank)
+
+    dp_rank = coords[config['mesh_name'].index('dp')]  # Which DP replica
+    tp_rank = coords[config['mesh_name'].index('tp')]  # Which TP shard
+    pp_rank = coords[config['mesh_name'].index('pp')]  # Which PP stage
+    
+    dp_size = config['mesh_dim'][config['mesh_name'].index('dp')]
+    tp_size = config['mesh_dim'][config['mesh_name'].index('tp')]
+    pp_size = config['mesh_dim'][config['mesh_name'].index('pp')]
+
+    # ═══════════════════════════════════════════════════════════════════
+    # STEP 2: Calculate which layers this GPU owns (Pipeline Parallelism)
+    # ═══════════════════════════════════════════════════════════════════
+
+    num_layers = 12
+    layers_per_stage = num_layers//pp_size
+
+    my_layer_start = pp_rank*layers_per_stage
+    my_layer_end = my_layer_start + layers_per_stage
+    my_layers = list(range(my_layer_start, my_layer_end))
+
+    # Example with PP=2:
+    #   pp_rank=0: layers [0, 1, 2, 3, 4, 5]
+    #   pp_rank=1: layers [6, 7, 8, 9, 10, 11]
+
+    # ═══════════════════════════════════════════════════════════════════
+    # STEP 3: Open safetensors file (memory-mapped, NOT loaded to RAM!)
+    # ═══════════════════════════════════════════════════════════════════
+    
+    state_dict = {}
+
+    with safe_open(checkpoint_path, framework='pt', device=str(device)) as f:
+        # ═══════════════════════════════════════════════════════════════
+        # STEP 4A: Load embeddings (only first PP stage needs them)
+        # ═══════════════════════════════════════════════════════════════
+
+        if pp_rank == 0: # First stage
+            # Embeddings are replicated across TP Ranks and Not sharded. 
+            # Vocab Embeddings
+            state_dict['wte.weight'] = f.get_tensor('wte.weight') # [50257, 768]
+
+            # Positional Encodings
+            state_dict['wpe.weight'] = f.get_tensor('wpe.weight') # [1024, 768]
+
+        # ═══════════════════════════════════════════════════════════════
+        # STEP 4B: Load transformer blocks (only my PP stage's layers)
+        # ═══════════════════════════════════════════════════════════════
+
+        for layer_idx in my_layers:
+            prefix = f"h.{layer_idx}"
+
+            # ─────────────────────────────────────────────────────────
+            # LayerNorms: REPLICATED (each TP rank has full copy)
+            # ─────────────────────────────────────────────────────────
+
+            state_dict[f"{prefix}.ln_1.weight"] = f.get_tensor(f"{prefix}.ln_1.weight")
+            state_dict[f"{prefix}.ln_1.bias"] = f.get_tensor(f"{prefix}.ln_1.bias")
+            state_dict[f"{prefix}.ln_2.weight"] = f.get_tensor(f"{prefix}.ln_2.weight")
+            state_dict[f"{prefix}.ln_2.bias"] = f.get_tensor(f"{prefix}.ln_2.bias")
+
+            # ─────────────────────────────────────────────────────────
+            # Attention c_attn: COLUMN PARALLEL (shard output dim)
+            #   Full: [768, 2304] → Each TP rank: [768, 1152]
+            # ─────────────────────────────────────────────────────────
+            c_attn_w_full = f.get_slice(f"{prefix}.attn.c_attn.weight")
+            c_attn_b_full = f.get_slice(f"{prefix}.attn.c_attn.bias")
+            
+            out_dim = 2304
+            cols_per_rank = out_dim // tp_size  # 2304 / 2 = 1152
+            col_start = tp_rank * cols_per_rank
+            col_end = col_start + cols_per_rank
+            
+            # The magic: read ONLY the slice we need!
+            state_dict[f"{prefix}.attn.c_attn.weight"] = c_attn_w_full[:, col_start:col_end]
+            state_dict[f"{prefix}.attn.c_attn.bias"] = c_attn_b_full[col_start:col_end]
+
+
+            # ─────────────────────────────────────────────────────────
+            # Attention c_proj: ROW PARALLEL (shard input dim)
+            #   Full: [768, 768] → Each TP rank: [384, 768]
+            # ─────────────────────────────────────────────────────────
+            c_proj_w_full = f.get_slice(f"{prefix}.attn.c_proj.weight")
+            
+            in_dim = 768
+            rows_per_rank = in_dim // tp_size  # 768 / 2 = 384
+            row_start = tp_rank * rows_per_rank
+            row_end = row_start + rows_per_rank
+            
+            state_dict[f"{prefix}.attn.c_proj.weight"] = c_proj_w_full[row_start:row_end, :]
+            
+            # Bias: only tp_rank=0 stores it (to avoid double-add after AllReduce)
+            if tp_rank == 0:
+                state_dict[f"{prefix}.attn.c_proj.bias"] = f.get_tensor(f"{prefix}.attn.c_proj.bias")
+
+            # ─────────────────────────────────────────────────────────
+            # MLP c_fc: COLUMN PARALLEL (shard output dim)
+            #   Full: [768, 3072] → Each TP rank: [768, 1536]
+            # ─────────────────────────────────────────────────────────
+            c_fc_w_full = f.get_slice(f"{prefix}.mlp.c_fc.weight")
+            c_fc_b_full = f.get_slice(f"{prefix}.mlp.c_fc.bias")
+            
+            out_dim = 3072
+            cols_per_rank = out_dim // tp_size  # 3072 / 2 = 1536
+            col_start = tp_rank * cols_per_rank
+            col_end = col_start + cols_per_rank
+            
+            state_dict[f"{prefix}.mlp.c_fc.weight"] = c_fc_w_full[:, col_start:col_end]
+            state_dict[f"{prefix}.mlp.c_fc.bias"] = c_fc_b_full[col_start:col_end]
+
+            # ─────────────────────────────────────────────────────────
+            # MLP c_proj: ROW PARALLEL (shard input dim)
+            #   Full: [3072, 768] → Each TP rank: [1536, 768]
+            # ─────────────────────────────────────────────────────────
+            c_proj_w_full = f.get_slice(f"{prefix}.mlp.c_proj.weight")
+            
+            in_dim = 3072
+            rows_per_rank = in_dim // tp_size  # 3072 / 2 = 1536
+            row_start = tp_rank * rows_per_rank
+            row_end = row_start + rows_per_rank
+            
+            state_dict[f"{prefix}.mlp.c_proj.weight"] = c_proj_w_full[row_start:row_end, :]
+            
+            if tp_rank == 0:
+                state_dict[f"{prefix}.mlp.c_proj.bias"] = f.get_tensor(f"{prefix}.mlp.c_proj.bias")
+
+            
+        # ═══════════════════════════════════════════════════════════════
+        # STEP 4C: Load final layer norm (only last PP stage needs it)
+        # ═══════════════════════════════════════════════════════════════
+        
+        if pp_rank == pp_size - 1:  # Last stage
+            state_dict["ln_f.weight"] = f.get_tensor("ln_f.weight")
+            state_dict["ln_f.bias"] = f.get_tensor("ln_f.bias")
+    
+    return state_dict
+
+
+
+
+    
