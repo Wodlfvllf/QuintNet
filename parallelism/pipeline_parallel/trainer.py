@@ -34,7 +34,7 @@ class PipelineTrainer:
 
     This class manages the forward and backward passes for micro-batches across
     pipeline stages, handling inter-stage communication and gradient accumulation.
-    It supports different pipeline schedules.
+    It supports different pipeline schedules and task types (classification, CLM).
     """
     def __init__(self, 
                  model, 
@@ -45,7 +45,9 @@ class PipelineTrainer:
                  device, 
                  optimizer=None, 
                  max_grad_norm=1.0,
-                 schedule_type='1f1b'
+                 schedule_type='1f1b',
+                 task_type='classification',  # 'classification' or 'clm'
+                 vocab_size=None,  # Required for 'clm' task type
                  ):
         """
         Initializes the PipelineTrainer.
@@ -64,6 +66,10 @@ class PipelineTrainer:
             max_grad_norm (float, optional): Maximum gradient norm for clipping.
             schedule_type (str, optional): The type of pipeline schedule to use
                 ('1f1b' for One-Forward-One-Backward or 'afab' for All-Forward-All-Backward).
+            task_type (str, optional): Type of task - 'classification' for images,
+                'clm' for causal language modeling (GPT-2).
+            vocab_size (int, optional): Vocabulary size for CLM tasks. Required when
+                task_type='clm'.
         """
         self.model = model
         self.pp_group = pp_group
@@ -78,6 +84,11 @@ class PipelineTrainer:
         self.rank = pp_rank
         self.world_size = dist.get_world_size(group=pp_group)
         
+        # Task-specific configuration
+        self.task_type = task_type
+        self.vocab_size = vocab_size
+        if task_type == 'clm' and vocab_size is None:
+            self.vocab_size = 50257  # GPT-2 default
 
         # Track metrics during training (used by schedule classes)
         self.batch_labels = []
@@ -125,12 +136,15 @@ class PipelineTrainer:
             dtype (torch.dtype): The data type of the tensors.
 
         Returns:
-            Tuple of (avg_loss, avg_accuracy) - only on the last rank of the pipeline.
+            Tuple of (avg_loss, metric) - metric is accuracy for classification,
+            perplexity for CLM. Only on the last rank of the pipeline.
         """
+        import math
+        
         self.model.eval()
         total_loss = 0.0
         total_correct = 0
-        total_samples = 0
+        total_samples = 0  # For classification: number of samples; for CLM: number of tokens
         
         with torch.no_grad():
             for i, batch in enumerate(val_loader):
@@ -148,8 +162,15 @@ class PipelineTrainer:
                 
                 # Forward pass through the local stage
                 if self.is_first_stage:
-                    # First stage takes image data
-                    output_tensor = self.model.forward(batch["image"].to(device))
+                    if self.task_type == 'clm':
+                        # CLM: use input_ids with position_ids
+                        input_ids = batch["input_ids"].to(device)
+                        seq_len = input_ids.size(1)
+                        position_ids = torch.arange(seq_len, device=device).unsqueeze(0).expand(input_ids.size(0), -1)
+                        output_tensor = self.model.forward(input_ids, position_ids=position_ids)
+                    else:
+                        # Classification: use images
+                        output_tensor = self.model.forward(batch["image"].to(device))
                 else:
                     # Subsequent stages take activations from previous stage
                     output_tensor = self.model.forward(input_tensor)
@@ -169,20 +190,40 @@ class PipelineTrainer:
                 
                 # Calculate metrics on the last stage only
                 if self.is_last_stage:
-                    labels = batch["label"].to(device)
-                    loss = self.criterion(output_tensor, labels)
-                    
-                    total_loss += loss.item() * labels.size(0)
-                    
-                    # Calculate accuracy
-                    _, predicted = torch.max(output_tensor, 1)
-                    total_correct += (predicted == labels).sum().item()
-                    total_samples += labels.size(0)
+                    if self.task_type == 'clm':
+                        # CLM: compute token-level loss and perplexity
+                        labels = batch["labels"].to(device)
+                        logits = output_tensor
+                        loss = self.criterion(
+                            logits.view(-1, self.vocab_size),
+                            labels.view(-1)
+                        )
+                        num_tokens = (labels != -100).sum().item()
+                        total_loss += loss.item() * num_tokens
+                        total_samples += num_tokens
+                    else:
+                        # Classification: compute accuracy
+                        labels = batch["label"].to(device)
+                        loss = self.criterion(output_tensor, labels)
+                        
+                        total_loss += loss.item() * labels.size(0)
+                        
+                        # Calculate accuracy
+                        _, predicted = torch.max(output_tensor, 1)
+                        total_correct += (predicted == labels).sum().item()
+                        total_samples += labels.size(0)
         
         # Return metrics only from the last stage
         if self.is_last_stage and total_samples > 0:
             avg_loss = total_loss / total_samples
-            avg_accuracy = (total_correct / total_samples) * 100.0
-            return avg_loss, avg_accuracy
+            
+            if self.task_type == 'clm':
+                # Return perplexity for CLM
+                perplexity = math.exp(avg_loss) if avg_loss < 20 else float('inf')
+                return avg_loss, perplexity
+            else:
+                # Return accuracy for classification
+                avg_accuracy = (total_correct / total_samples) * 100.0
+                return avg_loss, avg_accuracy
         else:
             return None, None
