@@ -12,6 +12,8 @@ from ..parallelism import TensorParallel
 from ..parallelism import PipelineParallelWrapper
 from ..parallelism import DataParallel
 from ..parallelism.data_parallel.core.config import DistributedConfig
+from ..core import load_gpt2_distributed
+from ..utils.GPT2.gpt2_stage import GPT2Stage
 
 class Hybrid3DCoordinator(BaseCoordinator):
     """
@@ -21,7 +23,13 @@ class Hybrid3DCoordinator(BaseCoordinator):
     It is designed for training extremely large models on large-scale, multi-node
     GPU clusters.
     """
-    def __init__(self, model: nn.Module, pg_manager: ProcessGroupManager, config: dict, **kwargs):
+    def __init__(self, 
+                model: nn.Module, 
+                pg_manager: ProcessGroupManager, 
+                config: dict, 
+                checkpoint_path: str = None, 
+                is_staged: bool = False, 
+                **kwargs):
         """
         Initializes the Hybrid3DCoordinator.
 
@@ -31,7 +39,12 @@ class Hybrid3DCoordinator(BaseCoordinator):
             config (dict): The configuration dictionary.
             **kwargs: Catches any additional arguments.
         """
-        super().__init__(model, pg_manager=pg_manager, config=config, **kwargs)
+        super().__init__(model, 
+                        pg_manager=pg_manager, 
+                        config=config, 
+                        checkpoint_path = checkpoint_path, 
+                        is_staged = is_staged, 
+                        **kwargs)
 
     def parallelize(self) -> nn.Module:
         """
@@ -49,6 +62,116 @@ class Hybrid3DCoordinator(BaseCoordinator):
         Returns:
             nn.Module: The fully parallelized model.
         """
+
+        if self.is_staged:
+            return self._parallelize_staged()
+        else:
+            return self._parallelize_non_staged()
+        
+    def _parallelize_staged(self) -> nn.Module:
+        """
+        Applies 3D parallelism with distributed loading from checkpoint.
+        
+        Flow:
+        1. Load sharded weights (each GPU loads only its portion)
+        2. Build GPT2Stage with TP already applied
+        3. Wrap with Pipeline Parallelism
+        4. Wrap with Data Parallelism
+
+        Returns:
+            nn.Module: The fully parallelized model.
+        """
+        # ─────────────────────────────────────────────────────────────────
+        # Get device and ranks
+        # ─────────────────────────────────────────────────────────────────
+        global_rank = dist.get_rank()
+        local_rank = int(os.environ["LOCAL_RANK"])
+        device = torch.device(f"cuda:{local_rank}")
+        
+        # Get process groups
+        tp_group = self.pg_manager.get_group('tp')
+        pp_group = self.pg_manager.get_group('pp')
+        
+        # Get coordinates and sizes
+        coords = self.pg_manager.get_coordinates_tensor_search(global_rank)
+        tp_rank = coords[self.config['mesh_name'].index('tp')]
+        pp_rank = coords[self.config['mesh_name'].index('pp')]
+        tp_size = self.config['mesh_dim'][self.config['mesh_name'].index('tp')]
+        pp_size = self.config['mesh_dim'][self.config['mesh_name'].index('pp')]
+        
+        # ─────────────────────────────────────────────────────────────────
+        # 1. Load sharded weights from checkpoint
+        # Each GPU loads only its required portion (memory efficient!)
+        # ─────────────────────────────────────────────────────────────────
+        state_dict = load_gpt2_distributed(
+            checkpoint_path=self.checkpoint_path,
+            pg_manager=self.pg_manager,
+            config=self.config,
+            device=device,
+        )
+        
+        # ─────────────────────────────────────────────────────────────────
+        # 2. Build GPT2Stage from sharded state_dict
+        # TP is applied within the stage (ColumnParallel/RowParallel layers)
+        # ─────────────────────────────────────────────────────────────────
+        stage = GPT2Stage.from_sharded_state_dict(
+            state_dict=state_dict,
+            config=self.config,
+            pp_rank=pp_rank,
+            pp_size=pp_size,
+            tp_rank=tp_rank,
+            tp_size=tp_size,
+            tp_group=tp_group,
+            device=device,
+        )
+        
+        # ─────────────────────────────────────────────────────────────────
+        # 3. Wrap with Pipeline Parallelism
+        # Pass pre-built stage instead of building from full model
+        # ─────────────────────────────────────────────────────────────────
+        pp_model = PipelineParallelWrapper(
+            model=stage,
+            device_mesh=self.pg_manager.device_mesh,
+            rank=pp_rank,
+            pp_group=pp_group,
+            pp_size=pp_size,
+            device=device,
+            stage_module=stage,  # Use pre-built stage
+        )
+        
+        # ─────────────────────────────────────────────────────────────────
+        # 4. Wrap with Data Parallelism
+        # CRITICAL: Use DP-specific process group to avoid deadlocks!
+        # ─────────────────────────────────────────────────────────────────
+        dp_group = self.pg_manager.get_group('dp')
+        dp_config = DistributedConfig(
+            backend=self.config.get('backend', 'nccl'),
+            process_group=dp_group,
+            use_ddp=True,
+            find_unused_parameters=False,
+            gradient_as_bucket_view=True,
+            static_graph=True,
+        )
+        
+        dp_model = DataParallel(pp_model, dp_config)
+        return dp_model
+
+    def _parallelize_non_staged(self) -> nn.Module:
+        """
+        Applies 3D parallelism to the model in the correct order.
+
+        The correct order of application is:
+        1.  **Tensor Parallelism (TP):** The model's layers are first sharded
+            across the GPUs in the tensor-parallel group.
+        2.  **Pipeline Parallelism (PP):** The tensor-sharded model is then
+            split into stages across the pipeline-parallel group.
+        3.  **Data Parallelism (DP):** The entire tensor-and-pipeline-parallel
+            model is then replicated, and `DataParallel` is used to synchronize
+            gradients across these replicas.
+
+        Returns:
+            nn.Module: The fully parallelized model.
+        """ 
         global_rank = dist.get_rank()
         local_rank = int(os.environ["LOCAL_RANK"])
         device = torch.device(f"cuda:{local_rank}")
