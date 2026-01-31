@@ -9,15 +9,15 @@
 
 # Training Configuration
 # ----------------------
-batch_size: 256               # Global batch size - INCREASED to use more GPU memory
+batch_size: 512               # Global batch size (512 = micro_batch 32 * grad_acc 8 * DP 2)
 learning_rate: 5.0e-5         # AdamW learning rate
 num_epochs: 3                 # Number of training epochs
-grad_acc_steps: 8             # Gradient accumulation steps - INCREASED from 4
+grad_acc_steps: 8             # Gradient accumulation steps
 max_grad_norm: 1.0            # Gradient clipping
-warmup_steps: 100             # LR warmup steps
-num_workers: 4                # DataLoader workers - INCREASED from 2
-max_samples: 2000             # Training dataset limit
-max_val_samples: 200          # Validation dataset limit
+warmup_steps: 200             # LR warmup steps (increased for more samples)
+num_workers: 4                # DataLoader workers
+max_samples: 10000            # Training dataset limit - SCALED UP
+max_val_samples: 500          # Validation dataset limit - SCALED UP
 
 # Model Configuration (GPT-2 Base)
 # --------------------------------
