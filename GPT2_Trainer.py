@@ -327,7 +327,15 @@ class GPT2Trainer:
         if num_optimizer_steps < 1:
             num_optimizer_steps = 1
         
-        for step in range(num_optimizer_steps):
+        # Progress bar for pipeline training
+        pbar = tqdm(
+            range(num_optimizer_steps),
+            desc=f"Epoch {epoch+1} [Pipeline]",
+            disable=(self.global_rank != 0),
+            ncols=100,
+        )
+        
+        for step in pbar:
             step_loss, step_ppl = self.pipeline_trainer.train_step(
                 self.train_loader,
                 self.tensor_shapes,
@@ -342,6 +350,16 @@ class GPT2Trainer:
             if step_loss is not None:
                 total_loss += step_loss
                 num_steps += 1
+                
+                # Update progress bar with metrics
+                if self.global_rank == 0:
+                    avg_loss = total_loss / num_steps
+                    current_ppl = math.exp(step_loss) if step_loss < 20 else float('inf')
+                    pbar.set_postfix({
+                        'loss': f'{step_loss:.3f}',
+                        'ppl': f'{current_ppl:.1f}',
+                        'avg_loss': f'{avg_loss:.3f}'
+                    })
         
         if num_steps > 0:
             avg_loss = total_loss / num_steps
