@@ -725,16 +725,26 @@ def merge_and_test_model(
                         merged_stage[key] = available_tensors[0]
                     else:
                         # Key exists in multiple ranks - merge based on layer type
-                        if "c_attn.weight" in key or "c_fc.weight" in key:
+                        # NOTE: Keys have .proj. in them, e.g. c_attn.proj.weight
+                        if "c_attn" in key and "weight" in key:
                             # Column parallel weights: concat along dim 0 (out_features)
                             merged_stage[key] = torch.cat(available_tensors, dim=0)
-                        elif "c_attn.bias" in key or "c_fc.bias" in key:
+                            print(f"      TP concat c_attn.weight: {key} -> {merged_stage[key].shape}")
+                        elif "c_attn" in key and "bias" in key:
                             # Column parallel biases: concat along dim 0
                             merged_stage[key] = torch.cat(available_tensors, dim=0)
-                        elif "c_proj.weight" in key:
+                        elif "c_fc" in key and "weight" in key:
+                            # Column parallel weights: concat along dim 0
+                            merged_stage[key] = torch.cat(available_tensors, dim=0)
+                            print(f"      TP concat c_fc.weight: {key} -> {merged_stage[key].shape}")
+                        elif "c_fc" in key and "bias" in key:
+                            # Column parallel biases: concat along dim 0
+                            merged_stage[key] = torch.cat(available_tensors, dim=0)
+                        elif "c_proj" in key and "weight" in key:
                             # Row parallel weights: concat along dim 1 (in_features)
                             merged_stage[key] = torch.cat(available_tensors, dim=1)
-                        elif "c_proj.bias" in key:
+                            print(f"      TP concat c_proj.weight: {key} -> {merged_stage[key].shape}")
+                        elif "c_proj" in key and "bias" in key:
                             # Row parallel bias: use rank 0's copy (should be identical after allreduce)
                             merged_stage[key] = available_tensors[0]
                         else:
@@ -745,18 +755,38 @@ def merge_and_test_model(
             print(f"   ✓ Merged PP stage {pp_rank}")
         
         # ─────────────────────────────────────────────────────────────────────
-        # STEP 3: Merge PP stages
+        # STEP 3: Merge PP stages (renumber layers for stage > 0)
         # ─────────────────────────────────────────────────────────────────────
         print("\n🔗 STEP 3: Merging PP stages...")
+        
+        # Calculate layers per stage
+        n_layers = 12  # GPT-2 has 12 layers
+        layers_per_stage = n_layers // pp_size
+        print(f"   Layers per stage: {layers_per_stage}")
         
         if pp_size == 1:
             merged_state = pp_stages[0]
         else:
-            # Combine all PP stages
+            # Combine all PP stages, renumbering layer indices
             merged_state = {}
             for pp_rank, stage_state in sorted(pp_stages.items()):
+                layer_offset = pp_rank * layers_per_stage
+                
                 for key, value in stage_state.items():
-                    merged_state[key] = value
+                    new_key = key
+                    
+                    # Renumber block indices: blocks.X -> blocks.(X + offset)
+                    if key.startswith("blocks."):
+                        parts = key.split(".")
+                        block_idx = int(parts[1])
+                        new_block_idx = block_idx + layer_offset
+                        parts[1] = str(new_block_idx)
+                        new_key = ".".join(parts)
+                        
+                        if block_idx != new_block_idx:
+                            print(f"      PP renumber: {key} -> {new_key}")
+                    
+                    merged_state[new_key] = value
         
         print(f"   ✓ Combined {pp_size} pipeline stages")
     
@@ -785,8 +815,16 @@ def merge_and_test_model(
     
     # ─────────────────────────────────────────────────────────────────────────
     # Convert QuintNet keys to HuggingFace format
-    # QuintNet: blocks.X.attn.c_attn.weight, blocks.X.ln1.weight, etc.
-    # HuggingFace: transformer.h.X.attn.c_attn.weight, transformer.h.X.ln_1.weight, etc.
+    # Actual checkpoint format from logs:
+    #   embedding.wte.weight, embedding.wpe.weight
+    #   lm_head_weight (underscore!)
+    #   blocks.X.attn.c_attn.proj.weight (extra .proj.!)  
+    #   blocks.X.mlp.c_fc.proj.weight (extra .proj.!)
+    # HuggingFace expects:
+    #   transformer.wte.weight, transformer.wpe.weight
+    #   lm_head.weight
+    #   transformer.h.X.attn.c_attn.weight
+    #   transformer.h.X.mlp.c_fc.weight
     # ─────────────────────────────────────────────────────────────────────────
     print("\n   🔄 Converting keys to HuggingFace format...")
     
@@ -797,40 +835,53 @@ def merge_and_test_model(
         new_key = key
         need_transpose = False
         
+        # Handle embeddings: embedding.wte -> transformer.wte
+        if key.startswith("embedding."):
+            new_key = key.replace("embedding.", "transformer.")
+        
+        # Handle lm_head_weight -> lm_head.weight (underscore to dot)
+        if key == "lm_head_weight":
+            new_key = "lm_head.weight"
+        
         # Convert block naming: blocks.X -> transformer.h.X
         if key.startswith("blocks."):
             new_key = key.replace("blocks.", "transformer.h.")
+        
+        # Remove extra .proj. from attention and MLP layers
+        # blocks.X.attn.c_attn.proj.weight -> transformer.h.X.attn.c_attn.weight
+        # blocks.X.attn.c_proj.proj.weight -> transformer.h.X.attn.c_proj.weight
+        # blocks.X.mlp.c_fc.proj.weight -> transformer.h.X.mlp.c_fc.weight
+        # blocks.X.mlp.c_proj.proj.weight -> transformer.h.X.mlp.c_proj.weight
+        new_key = new_key.replace(".c_attn.proj.", ".c_attn.")
+        new_key = new_key.replace(".c_proj.proj.", ".c_proj.")
+        new_key = new_key.replace(".c_fc.proj.", ".c_fc.")
         
         # Convert layer norm naming: ln1 -> ln_1, ln2 -> ln_2
         new_key = new_key.replace(".ln1.", ".ln_1.")
         new_key = new_key.replace(".ln2.", ".ln_2.")
         
-        # Add transformer prefix for embeddings
-        if key.startswith("wte.") or key.startswith("wpe."):
-            new_key = "transformer." + key
-        elif key == "token_embedding.weight":
-            new_key = "transformer.wte.weight"
-        elif key == "position_embedding.weight":
-            new_key = "transformer.wpe.weight"
-        
         # Handle final layer norm
-        if "final_ln." in key or (key.startswith("ln_f.") and not key.startswith("transformer.")):
+        if "final_ln." in key:
+            new_key = "transformer.ln_f." + key.split(".")[-1]
+        elif key.startswith("ln_f.") and not key.startswith("transformer."):
             new_key = "transformer.ln_f." + key.split(".")[-1]
         
         # Handle attention/MLP weights - need transpose for Conv1D -> Linear
         # HuggingFace GPT-2 uses Conv1D which stores weights as (in_features, out_features)
         # Our Linear layers store as (out_features, in_features), so we need to transpose
-        if "c_attn.weight" in key or "c_proj.weight" in key:
-            value = value.t().contiguous()
-            need_transpose = True
-        elif "c_fc.weight" in key or "mlp.c_proj.weight" in key:
-            value = value.t().contiguous()
-            need_transpose = True
+        if ".c_attn.weight" in new_key or ".c_proj.weight" in new_key:
+            if len(value.shape) == 2:  # Only transpose 2D weights
+                value = value.t().contiguous()
+                need_transpose = True
+        elif ".c_fc.weight" in new_key:
+            if len(value.shape) == 2:
+                value = value.t().contiguous()
+                need_transpose = True
         
         hf_state[new_key] = value
         converted_count += 1
         
-        if converted_count <= 5:
+        if converted_count <= 10:
             trans_str = " (transposed)" if need_transpose else ""
             print(f"      {key} -> {new_key}{trans_str}")
     
